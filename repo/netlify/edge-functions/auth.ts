@@ -97,12 +97,20 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Referrer-Policy": "no-referrer",
 };
 
-/** Redirect to a fixed, configuration-derived location. `location` is never taken from user input. */
-function redirectTo(location: string, cookies: string[] = []) {
-  const h = new Headers({ ...SECURITY_HEADERS, Location: location });
+/** The only redirect helper. The destination must be an https URL whose origin is on the allow-list
+ *  (this site's configured origin or Microsoft's sign-in service); anything else throws, and the
+ *  request handler turns that into an error page. No destination is ever read from the request. */
+function safeRedirect(destination: URL, siteOrigin: string, cookies: string[] = []) {
+  const allowedOrigins = [siteOrigin, MS];
+  if (destination.protocol !== "https:" || !allowedOrigins.includes(destination.origin)) {
+    throw new Error("blocked redirect to a destination that is not on the allow-list");
+  }
+  const h = new Headers({ ...SECURITY_HEADERS, Location: destination.href });
   cookies.forEach((c) => h.append("Set-Cookie", c));
   return new Response(null, { status: 302, headers: h });
 }
+/** This site's home page: configured origin + fixed path. */
+const homeUrl = (siteOrigin: string) => new URL(HOME_PATH, siteOrigin);
 
 /** Static HTML page. `message` and `extraHtml` are always literals from this file, never request data. */
 function page(title: string, message: string, status: number, extraHtml = "", cookies: string[] = []) {
@@ -219,20 +227,22 @@ async function startLogin(origin: string) {
   const flow = await new SignJWT({ state, nonce, verifier })
     .setProtectedHeader({ alg: "HS256" }).setIssuer(origin).setAudience(SESSION_AUD)
     .setIssuedAt().setExpirationTime("10m").sign(secretKey());
-  const p = new URLSearchParams({
+  // Destination: Microsoft's authorize endpoint for our tenant (a constant). Only query parameters are added.
+  const dest = new URL(AUTHORIZE_URL);
+  dest.search = new URLSearchParams({
     client_id: CLIENT_ID,
     response_type: "code",
-    redirect_uri: origin + CALLBACK_PATH,
+    redirect_uri: new URL(CALLBACK_PATH, origin).href, // our own callback, from configuration
     response_mode: "query",
     scope: "openid profile email",
-    state,
+    state, // anti-CSRF value for the sign-in flow, checked in finishLogin
     nonce,
     code_challenge: await sha256(verifier),
     code_challenge_method: "S256",
     prompt: "select_account",
-  });
+  }).toString();
   // Also drop any stale session cookie.
-  return redirectTo(`${AUTHORIZE_URL}?${p}`, [cookie(FLOW_COOKIE, flow, 600), cookie(SESSION_COOKIE, "", 0)]);
+  return safeRedirect(dest, origin, [cookie(FLOW_COOKIE, flow, 600), cookie(SESSION_COOKIE, "", 0)]);
 }
 
 async function finishLogin(req: Request, url: URL, origin: string) {
@@ -262,7 +272,7 @@ async function finishLogin(req: Request, url: URL, origin: string) {
       client_secret: CLIENT_SECRET,
       grant_type: "authorization_code",
       code,
-      redirect_uri: origin + CALLBACK_PATH,
+      redirect_uri: new URL(CALLBACK_PATH, origin).href,
       code_verifier: flow.verifier,
     }),
   });
@@ -296,7 +306,8 @@ async function finishLogin(req: Request, url: URL, origin: string) {
 
   const { token, maxAge } = await mintSession(
     { oid, tid, email, name: String(claims.name || ""), jti: randomString(16), login: nowSec() }, origin);
-  return redirectTo(origin + HOME_PATH, [cookie(SESSION_COOKIE, token, maxAge), ...clearFlow]);
+  // Signed in: always this site's home page. Nothing in the callback request selects the destination.
+  return safeRedirect(homeUrl(origin), origin, [cookie(SESSION_COOKIE, token, maxAge), ...clearFlow]);
 }
 
 // ------------------------------------------------------------------ sign-out
@@ -311,18 +322,25 @@ async function logoutPage(sess: Session | null, origin: string) {
 <p><a style="color:#92D400" href="${HOME_PATH}">Back to the dashboard</a></p>`);
 }
 
+/** POST /.auth/logout. Three independent CSRF defences must all pass before any state changes:
+ *    1. the browser's Origin/Referer is this site (checked in the handler for every POST),
+ *    2. the SameSite=Lax session cookie is present and valid,
+ *    3. the form carries the anti-CSRF token issued to that session by logoutPage().
+ *  Without a valid session there is nothing to sign out, so nothing is changed and no redirect is made. */
 async function doLogout(req: Request, sess: Session | null, origin: string) {
-  const clear = [cookie(SESSION_COOKIE, "", 0)];
-  if (sess) {
-    let token = "";
-    try {
-      token = String((await req.formData()).get("csrf") || "");
-    } catch { /* no form body: treated as a missing token below */ }
-    if (!(await csrfValid(token, sess, origin))) return page("Sign out", "That sign-out request was not valid.", 403, RETRY_LINK);
-    await revoke(sess.jti, sess.login); // throws StoreUnavailable -> handler answers 503 and keeps the cookie
+  if (!sess) return await logoutPage(null, origin);
+  let token = "";
+  try {
+    token = String((await req.formData()).get("csrf") || "");
+  } catch { /* no form body: treated as a missing token below */ }
+  if (!(await csrfValid(token, sess, origin))) {
+    return page("Sign out", "That sign-out request was not valid.", 403, RETRY_LINK);
   }
-  const back = encodeURIComponent(origin + HOME_PATH);
-  return redirectTo(`${MS_LOGOUT_URL}?post_logout_redirect_uri=${back}`, clear);
+  await revoke(sess.jti, sess.login); // throws StoreUnavailable -> handler answers 503 and keeps the cookie
+  // Destination: Microsoft's sign-out endpoint for our tenant, returning to this site's home page.
+  const dest = new URL(MS_LOGOUT_URL);
+  dest.search = new URLSearchParams({ post_logout_redirect_uri: homeUrl(origin).href }).toString();
+  return safeRedirect(dest, origin, [cookie(SESSION_COOKIE, "", 0)]);
 }
 
 // ------------------------------------------------------------------ request handler
@@ -333,14 +351,26 @@ export default async (req: Request, context: Context) => {
     return page("Unavailable", "Sign-in is not configured yet.", 503);
   }
   // Only the canonical address is served (also blocks Host-header tricks and preview URLs).
-  if (url.origin !== origin) return redirectTo(origin + HOME_PATH);
+  if (url.origin !== origin) return safeRedirect(homeUrl(origin), origin);
 
+  // ---- CSRF protection for every state-changing request ----
+  // GET/HEAD never change state here. POST is the only other method accepted, and it must (a) come from
+  // this site per the browser's Origin/Referer and (b) be either the sign-out form, which is checked
+  // against a per-session token in doLogout(), or a script request carrying the custom
+  // X-Requested-With header that a cross-site form or link cannot add.
   const isRead = req.method === "GET" || req.method === "HEAD";
-  if (!isRead && req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: SECURITY_HEADERS });
-  if (!isRead && !sameOrigin(req, origin)) return new Response("Cross-site request blocked", { status: 403, headers: SECURITY_HEADERS });
+  if (!isRead) {
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: SECURITY_HEADERS });
+    if (!sameOrigin(req, origin)) return new Response("Cross-site request blocked", { status: 403, headers: SECURITY_HEADERS });
+    const isLogoutForm = url.pathname === LOGOUT_PATH;
+    if (!isLogoutForm && req.headers.get("x-requested-with") !== "fetch") {
+      return new Response("Cross-site request blocked", { status: 403, headers: SECURITY_HEADERS });
+    }
+  }
 
   try {
     if (url.pathname === CALLBACK_PATH) {
+      // Sign-in callback: protected against login CSRF by the `state` value bound to the signed flow cookie.
       return isRead ? await finishLogin(req, url, origin) : new Response("Method not allowed", { status: 405, headers: SECURITY_HEADERS });
     }
 
@@ -349,6 +379,7 @@ export default async (req: Request, context: Context) => {
     const sess = candidate && !(await isRevoked(candidate.jti)) ? candidate : null;
 
     if (url.pathname === LOGOUT_PATH) {
+      // GET only renders the confirmation form (no state change); the POST is CSRF-checked in doLogout().
       return req.method === "POST" ? await doLogout(req, sess, origin) : await logoutPage(sess, origin);
     }
 

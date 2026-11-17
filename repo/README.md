@@ -123,8 +123,12 @@ Run the fixture build locally to check it still renders, then commit.
   `<script>` block.
 - After sign-in the user always lands on `SITE_URL/`; redirect targets come from configuration, never from the request.
 - No page content is built by inserting data into HTML strings unescaped; the header subtitle and map tooltips use text nodes.
-- Requests other than GET (the feedback form, sign-out) must carry a same-site `Origin`/`Referer` header in addition to the
-  `SameSite=Lax` session cookie, which blocks cross-site request forgery.
+- Redirects are issued by one helper that only accepts https destinations on an allow-list of two origins: this
+  site (`SITE_URL`) and `login.microsoftonline.com`. Anything else throws and the request is refused.
+- CSRF: only GET/HEAD/POST are accepted. Every POST must come from this site (Origin/Referer check) on top of the
+  `SameSite=Lax` session cookie. Sign-out additionally requires a per-session token from the confirmation form; any
+  other POST (the feedback form) must carry the `X-Requested-With: fetch` header that a cross-site form cannot add.
+  The sign-in flow itself is protected by the OAuth `state` value bound to a signed cookie.
 - The Excel export library is loaded from cdnjs with a Subresource Integrity hash pinned to SheetJS 0.18.5, so a
   tampered copy will not run (the export then falls back to CSV).
 - CSV exports prefix any cell starting with `=`, `+`, `-`, `@`, tab or CR so spreadsheets don't execute it as a formula.
