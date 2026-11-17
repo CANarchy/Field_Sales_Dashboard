@@ -9,14 +9,14 @@ Sources (Monster Brewing workspace):
 
 Env vars (GitHub secrets):
   PBI_TENANT_ID, PBI_CLIENT_ID, PBI_CLIENT_SECRET   service principal with read access to both models
+Access control: Microsoft Entra ID via netlify/edge-functions/auth.ts (see README).
 Optional:
   SURVEY_START   first survey date to include (default 2026-07-01)
   OUT_DIR        where index.html is written (default dist/)
 
 Local dry run without Power BI:  python3 build_from_powerbi.py --fixture tests/fixture.json
 """
-import argparse, base64, collections, datetime as dt, json, os, re, sys, time
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import argparse, collections, datetime as dt, json, os, re, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KARMA_MODEL = "07f05c80-03e6-49c7-8e08-0a1cc6c27e61"
@@ -244,20 +244,27 @@ def refresh_karma(buy, rows):
 
 # ---------------------------------------------------------------- page
 def render(rows, buy, empmap, out_dir, subtitle=None):
+    """Write dist/index.html. Access control is enforced by the Netlify edge function
+    (netlify/edge-functions/auth.ts) against Microsoft Entra ID, so the page itself is plain HTML."""
     inner = open(os.path.join(HERE, 'template', 'dashboard.html'), encoding='utf-8').read()
-    js = lambda v: json.dumps(v, ensure_ascii=False, separators=(',', ':'))
+
+    def js(v):
+        # JSON that is safe to embed inside a <script> block: no sequence can close the tag
+        # or break the script (CWE-79), regardless of what the survey text contains.
+        return (json.dumps(v, ensure_ascii=False, separators=(',', ':'))
+                .replace('</', '<\\/').replace('<!--', '<\\!--')
+                .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029'))
     inner = inner.replace('__ROWS__', js(rows)).replace('__BUY__', js(buy)).replace('__EMPMAP__', js(empmap))
     if subtitle:
-        inner = re.sub(r'(<span id="siteSub">)[^<]*', r'\g<1>' + subtitle, inner)
-    wrapper = open(os.path.join(HERE, 'template', 'wrapper.html'), encoding='utf-8').read()
-    key = base64.b64decode(re.search(r'const MK="([^"]+)"', wrapper).group(1))
-    iv = os.urandom(12)
-    ct = AESGCM(key).encrypt(iv, inner.encode(), None)
-    page = wrapper.replace('__PIV__', base64.b64encode(iv).decode()).replace('__PCT__', base64.b64encode(ct).decode())
+        inner = re.sub(r'(<span id="siteSub">)[^<]*', lambda m: m.group(1) + html_escape(subtitle), inner)
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, 'index.html')
-    open(path, 'w', encoding='utf-8').write(page)
+    open(path, 'w', encoding='utf-8').write(inner)
     return path
+
+def html_escape(t):
+    return (str(t).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;').replace("'", '&#39;'))
 
 # ---------------------------------------------------------------- main
 def fetch_all(pbi, survey_start):

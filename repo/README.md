@@ -1,6 +1,6 @@
 # Monster Brewing Field Survey Dashboard — automated build
 
-Rebuilds https://mbrewfielddashboard.netlify.app/ every morning straight from Power BI
+Rebuilds https://mbrewfielddashboard.netlify.app/ every Monday morning straight from Power BI
 and deploys it to Netlify. No exports, no uploads. The site URL never changes.
 
 ```
@@ -13,12 +13,14 @@ Power BI (Depletions) ───┘
 
 | File | Purpose |
 |---|---|
-| `build_from_powerbi.py` | Pulls surveys + buyer commitments (KARMA model) and distributors, chain flags, case equivalents (Depletions model); renders and encrypts the page |
+| `build_from_powerbi.py` | Pulls surveys + buyer commitments (KARMA model) and distributors, chain flags, case equivalents (Depletions model); renders the page |
 | `template/dashboard.html` | The dashboard itself (HTML/CSS/JS, logos, map) with `__ROWS__`, `__BUY__`, `__EMPMAP__` placeholders |
-| `template/wrapper.html` | Login page + decryption wrapper; `__PIV__` / `__PCT__` are filled at build time |
+| `netlify/edge-functions/auth.ts` | Company SSO: every request is checked at Netlify's edge against Microsoft Entra ID before the page is served |
+| `netlify.toml` | Tells Netlify to run the edge function on every path and to never cache the page |
+| `build_from_exports.py` | Fallback when Power BI isn't reachable: `python3 build_from_exports.py <ResultsByForm.xlsx> <BuyerCommitments.xlsx> --out dist` renders the same page from KARMA grid exports |
 | `empmap.json` | Employee → `[title, manager]`. **Edit this when reps join or move.** Manager drives the Manager filter |
 | `dist_codes.json` | Distributor code → name fallback for codes not in the Depletions Bottler table |
-| `.github/workflows/build.yml` | Daily 12:00 PM EST schedule + manual "Run workflow" button |
+| `.github/workflows/build.yml` | Monday 06:00 ET schedule + manual "Run workflow" button |
 | `tests/fixture.json` | Small sample for a local dry run: `python3 build_from_powerbi.py --fixture tests/fixture.json` |
 
 ## One-time setup
@@ -32,11 +34,43 @@ Ask IT for a Microsoft Entra ID **app registration** and give you:
 
 No API permissions need to be granted on the app registration itself — workspace membership is what authorizes `executeQueries`.
 
-### 2. Netlify
+### 2. IT: Entra ID app registration for the sign-in (company SSO)
+The dashboard is protected by Microsoft Entra ID. Visitors are sent to the normal Microsoft sign-in page and only
+`@monsterbrewing.com` accounts (optionally only members of one security group) get through. The check runs on Netlify's
+edge, so an unsigned-in visitor never receives the page or its data. Ask IT to create a second app registration
+(the Power BI one from step 1 can be reused if IT prefers, but a separate one keeps the permissions apart):
+
+- **Supported account types**: *Accounts in this organizational directory only (single tenant)*
+- **Redirect URI** (platform *Web*): `https://mbrewfielddashboard.netlify.app/.auth/callback`
+  (add the same path on any custom domain you later attach)
+- **Front-channel logout URL**: `https://mbrewfielddashboard.netlify.app/.auth/logout`
+- **Authentication → ID tokens**: leave the implicit grant boxes *unchecked* (the site uses the authorization-code flow with PKCE)
+- **Certificates & secrets**: create a client secret; note the *value* and its expiry (set a calendar reminder to rotate it)
+- **API permissions**: the default `User.Read` / `openid` / `profile` / `email` delegated permissions are enough; grant admin consent
+- Optional, to limit access to a specific group: **Token configuration → Add groups claim → Security groups**, and in
+  *Enterprise applications → the app → Properties* set **Assignment required = Yes** and assign that group
+
+IT gives you: Tenant ID, Application (client) ID, client secret value, and (optional) the group's Object ID.
+
+### 3. Netlify
 - Site settings → General → **Site ID** (copy it)
 - User settings → Applications → **Personal access tokens** → New access token (copy it)
+- Site configuration → **Environment variables** → add (scope: all, or Production only):
 
-### 3. GitHub
+| Variable | Value |
+|---|---|
+| `ENTRA_TENANT_ID` | from IT (`f01d65ba-e57e-4f8f-8143-a43ed634f3c2`) |
+| `ENTRA_CLIENT_ID` | from IT |
+| `ENTRA_CLIENT_SECRET` | from IT (the secret *value*) |
+| `SESSION_SECRET` | any random string of 32+ characters, e.g. the output of `openssl rand -base64 48` |
+| `ENTRA_GROUP_ID` | optional: Object ID of the access group |
+| `ALLOWED_DOMAIN` | optional: defaults to `monsterbrewing.com` |
+| `SESSION_HOURS` | optional: how long a sign-in lasts, default 8 |
+
+Sessions are a signed, HttpOnly cookie; nobody's password is ever stored or seen by the site.
+Visiting `/.auth/logout` signs out.
+
+### 4. GitHub
 Create a private repo, push these files, then **Settings → Secrets and variables → Actions → New repository secret** for each:
 
 | Secret | Value |
@@ -47,11 +81,12 @@ Create a private repo, push these files, then **Settings → Secrets and variabl
 | `NETLIFY_AUTH_TOKEN` | Netlify personal access token |
 | `NETLIFY_SITE_ID` | Netlify site ID |
 
-Then **Actions → Build dashboard from Power BI → Run workflow** to test. The run log shows survey and
+Then **Actions → Build dashboard from Power BI → Run workflow** to test. The Netlify CLI deploy bundles the
+edge function from `netlify/edge-functions/` along with `dist/`. The run log shows survey and
 commitment counts, and the finished `index.html` is attached to the run as an artifact if you want to inspect it.
 
 ## Weekly operation
-Nothing. The workflow runs every day at 12:00 PM EST (1 PM during daylight time). To refresh sooner, press *Run workflow*.
+Nothing. The workflow runs Monday 06:00 ET. To refresh mid-week, press *Run workflow*.
 If the log shows a `NEW EMPLOYEES` warning, add them to `empmap.json` with their title and manager and commit —
 the next run picks it up.
 
@@ -69,3 +104,12 @@ the next run picks it up.
 ## Changing the dashboard
 Edit `template/dashboard.html` (the UI) — never the generated `dist/index.html`. The three placeholders must stay.
 Run the fixture build locally to check it still renders, then commit.
+
+## Security notes (code-scanning findings, Nov 2026)
+- Survey text, photo labels and photo URLs come from KARMA and are treated as untrusted: they are HTML-escaped,
+  URLs are only used if they are `https://`, and thumbnails use data attributes + delegated handlers (no inline
+  `onclick`/`onerror` built from data). The build escapes `</` inside the embedded JSON so a note can never close the
+  `<script>` block.
+- CSV exports prefix any cell starting with `=`, `+`, `-`, `@`, tab or CR so spreadsheets don't execute it as a formula.
+- The former client-side login (`wrapper.html`, embedded decryption key, "remember me" password storage) is gone;
+  access control is the Entra ID edge function above.

@@ -384,6 +384,7 @@ const EMPMAP = __EMPMAP__;
 const MGRN=e=>(EMPMAP[e]||["",""])[1];
 const E=0,RO=1,DT=2,AC=3,CI=4,ST=5,PR=6,CO=7,CH=8,DI=9,NO=10,FU=11,ND=12,PH=13,VIP=14,AD=15,ZP=16,RW=17,BO=18,WW=19;
 const $=id=>document.getElementById(id);
+const safeUrl=u=>{try{const x=new URL(String(u));return x.protocol==='https:'?x.href:'';}catch(_){return '';}};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const emps=[...new Set(ROWS.map(r=>r[E]))].sort();
@@ -598,7 +599,7 @@ function drawDetail(F){
   $('dSub').textContent=(state.sel?state.sel+' · ':'')+S.length+' survey'+(S.length===1?'':'s')+(S.length>DCAP?' — showing newest '+DCAP+' (use All Surveys to search the rest)':' · newest first');
   $('empGrid').innerHTML=S.slice(0,DCAP).map(r=>{
     const ps=photoSet(r);
-    const thumbs=r[PH].slice(0,4).map(([lab,url],i)=>`<img loading="lazy" src="${esc(direct(url))}" alt="${esc(lab)}" title="${esc(lab)}" onclick="openLB('${ps}',${i})" onerror="imgFail(this,'${esc(url)}','${esc(lab)}')">`).join('')+(r[PH].length>4?`<span class="tag" style="align-self:center">+${r[PH].length-4} more</span>`:'');
+    const thumbs=r[PH].slice(0,4).map(([lab,url],i)=>`<img loading="lazy" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('')+(r[PH].length>4?`<span class="tag" style="align-self:center">+${r[PH].length-4} more</span>`:'');
     return `<div class="emp"><div class="eh"><b>${esc(r[AC])}</b><span class="m">${esc(r[DT])}</span></div>
       <div class="body">
         <div class="acct">${esc(r[E])} <span style="font-weight:400;color:var(--mut)">· ${esc(r[RO]||'')}</span></div>
@@ -614,10 +615,10 @@ function drawDetail(F){
 // ---------- lightbox ----------
 let LBSET=[],LBI=0;
 function lbShow(){const [lab,url,cap]=LBSET[LBI];
-  const im=$('lbImg');im.dataset.p='';im.src=direct(url);
+  const im=$('lbImg');im.dataset.p='';im.src=direct(safeUrl(url));
   im.onerror=()=>{if(!im.dataset.p){im.dataset.p='1';im.src=prox(direct(url));}
     else{$('lbCap').textContent=cap+' — this image needs KARMA sign-in; use Open original below.';}};
-  $('lbCap').textContent=cap;$('lbOpen').href=url;
+  $('lbCap').textContent=cap;$('lbOpen').href=safeUrl(url)||'#';
   $('lbPrev').style.visibility=LBSET.length>1?'visible':'hidden';
   $('lbNext').style.visibility=LBSET.length>1?'visible':'hidden';}
 window.openLB=(setJson,i)=>{LBSET=JSON.parse(decodeURIComponent(setJson));LBI=i;$('lb').classList.add('open');lbShow();};
@@ -635,8 +636,11 @@ function direct(u){const m=u.match(/[?&]item_id=([0-9a-fA-F-]{20,})/);if(!m)retu
   return 'https://api.vtinfo.com/storage/v1/sources/'+s+'/files/'+m[1]+'/download';}
 window.imgFail=function(el,url,lab){
   if(!el.dataset.p){el.dataset.p='1';el.src=prox(direct(url));}
-  else{el.outerHTML='<a class="plink" href="'+url+'" target="_blank" rel="noopener">'+lab+' ↗</a>';}
+  else{const a=document.createElement('a');a.className='plink';a.href=safeUrl(url)||'#';a.target='_blank';a.rel='noopener';a.textContent=lab+' \u2197';el.replaceWith(a);}
 };
+// photo thumbnails: handlers are attached here (no inline onclick/onerror with data in them)
+document.addEventListener('click',e=>{const t=e.target;if(t&&t.tagName==='IMG'&&t.dataset.ps!==undefined)openLB(t.dataset.ps,+t.dataset.i);});
+document.addEventListener('error',e=>{const t=e.target;if(t&&t.tagName==='IMG'&&t.dataset.ps!==undefined)imgFail(t,t.dataset.url,t.dataset.lab);},true);
 function photoSet(r){return encodeURIComponent(JSON.stringify(r[PH].map(([lab,url])=>[lab,url,lab+' · '+r[AC]+' ('+r[CI]+', '+r[ST]+') · '+r[E]+' · '+r[DT]])));}
 
 // ---------- tabs ----------
@@ -670,7 +674,7 @@ function drawTable(F){
   $('tCount').textContent=S.length>CAP?('showing newest '+CAP+' of '+S.length+' — refine search to narrow'):'';
   $('tBody').innerHTML=S.slice(0,CAP).map(r=>{
     const ps=photoSet(r);
-    const th=r[PH].map(([lab,url],i)=>`<img class="tthumb" loading="lazy" src="${esc(direct(url))}" alt="${esc(lab)}" title="${esc(lab)}" onclick="openLB('${ps}',${i})" onerror="imgFail(this,'${esc(url)}','${esc(lab)}')">`).join('');
+    const th=r[PH].map(([lab,url],i)=>`<img class="tthumb" loading="lazy" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('');
     return `<tr><td style="white-space:nowrap">${esc(r[DT])}</td><td title="${esc(MGRN(r[E])?'Manager: '+MGRN(r[E]):'')}">${esc(r[E])}${MGRN(r[E])?'<div style="font-family:var(--mono);font-size:9px;color:var(--mut)">Mgr: '+esc(MGRN(r[E]))+'</div>':''}</td><td>${esc(r[RO])}</td><td><b>${esc(r[AC])}</b>${r[VIP]?'<div style="font-family:var(--mono);font-size:9.5px;color:var(--mut)">VIP '+esc(r[VIP])+'</div>':''}</td><td>${esc(r[AD])}</td><td>${esc(r[CI])}</td><td>${esc(r[ST])}</td><td>${esc(r[PR])}</td><td>${esc(r[CO])}</td><td>${esc(r[CH])}</td><td>${esc(r[DI])}</td><td>${esc(r[RW])}</td><td>${r[FU]==='YES'?'<span class="tag g">YES</span>':esc(r[FU]||'')}</td><td>${r[ND]==='YES'?'<span class="tag g">YES</span>':esc(r[ND]||'')}</td><td>${r[BO]==='YES'?'<span class="tag g">YES</span>':esc(r[BO]||'')}</td><td>${r[WW]==='YES'?'<span class="tag g">YES</span>':esc(r[WW]||'')}</td><td class="notes">${esc(r[NO])}</td><td style="min-width:145px">${th}</td></tr>`;
   }).join('')||`<tr><td colspan="18" class="empty">No surveys match${state.sel?' in '+state.sel+' — click the state again or hit Reset to search all states':''}.</td></tr>`;
 }
@@ -678,7 +682,7 @@ function drawTable(F){
 const XCOLS=['Date','Employee','Role','Account','VIP ID','Address','City','ST','Zip','Premise','COT','Chain','Distributors','Riding With','Follow Up','New Display','Bonus Objectives','New W&W/POS','Notes','Photo Links'];
 function exportRows(V){return V.map(r=>[r[DT],r[E],r[RO],r[AC],r[VIP],r[AD],r[CI],r[ST],r[ZP],r[PR],r[CO],r[CH],r[DI],r[RW],r[FU],r[ND],r[BO],r[WW],r[NO],r[PH].map(p=>p[1]).join(' | ')]);}
 function csvFallback(rows,cols,base){
-  const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const q=v=>{let s=String(v==null?'':v);if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};
   const csv=[cols.map(q).join(','),...rows.map(r=>r.map(q).join(','))].join('\r\n');
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}));
