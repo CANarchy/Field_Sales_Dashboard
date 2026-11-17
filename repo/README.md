@@ -67,10 +67,18 @@ IT gives you: Tenant ID, Application (client) ID, client secret value, and (opti
 | `ALLOWED_DOMAIN` | optional: defaults to `monsterbrewing.com` |
 | `SESSION_HOURS` | optional: hard lifetime of a sign-in, 1–12, default 8 |
 | `IDLE_MINUTES` | optional: sign in again after this long with no activity, 5–120, default 60 |
+| `RECHECK_MINUTES` | optional: how often access is re-verified with Microsoft, 5–60, default 15 |
 
 How access is decided: the ID token from Microsoft is verified (signature, issuer, audience, nonce), then the user
 is authorized by **tenant ID + object ID** from that token; the sign-in name must also be on `ALLOWED_DOMAIN`, and
 if `ENTRA_GROUP_ID` is set the token must list that group (a missing groups claim is a refusal, not a pass).
+
+Access is re-verified while a session is in use. If Microsoft last confirmed the user more than `RECHECK_MINUTES`
+ago, the next page load is sent silently back through Microsoft (`prompt=none`) and every rule above is applied
+again, so disabling an account or removing someone from the access group takes effect within minutes; if the silent
+check is declined the user gets a normal sign-in prompt, and a failed check ends the old session. Sessions also
+record which group rule they were issued under, so adding or changing `ENTRA_GROUP_ID` invalidates existing sessions
+immediately. (For removal to be reflected, keep the *groups claim* and *Assignment required* settings from step 2.)
 
 Sessions are a signed, HttpOnly `__Host-` cookie that renews while the user is active and expires after
 `IDLE_MINUTES` of inactivity or `SESSION_HOURS` after login, whichever is first; nobody's password is ever stored or

@@ -7,6 +7,10 @@
 //                          tenant id + object id (and, if configured, security-group membership).
 //   * Valid session     -> the page is served. Sessions are short, renew only while active, have a hard
 //                          lifetime cap and can be revoked server-side.
+//   * Re-authorization  -> at most every RECHECK_MINUTES the user is sent silently back through Microsoft,
+//                          so a disabled account or a removal from the access group takes effect within
+//                          minutes instead of lasting until the session ends. Sessions are also bound to
+//                          the configured group, so changing ENTRA_GROUP_ID invalidates existing sessions.
 //   * Sign-out          -> same-site POST carrying a short-lived CSRF token bound to the session; the session id is written to a
 //                          revocation store that every request consults.
 //   * Any error         -> the request is refused (the function fails closed; see `onError` below).
@@ -24,6 +28,7 @@
 //   ALLOWED_DOMAIN       optional: sign-in name must end with this domain (default monsterbrewing.com)
 //   SESSION_HOURS        optional: hard session lifetime, 1-12 hours (default 8)
 //   IDLE_MINUTES         optional: inactivity timeout, 5-120 minutes (default 60)
+//   RECHECK_MINUTES      optional: how often access is re-verified with Microsoft, 5-60 minutes (default 15)
 
 import type { Config, Context } from "https://edge.netlify.com/v1/index.ts";
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "npm:jose@5.9.6";
@@ -44,6 +49,7 @@ const GROUP_ID = env("ENTRA_GROUP_ID");
 const DOMAIN = env("ALLOWED_DOMAIN", "monsterbrewing.com").toLowerCase();
 const SESSION_HOURS = clamp(env("SESSION_HOURS"), 8, 1, 12);
 const IDLE_MINUTES = clamp(env("IDLE_MINUTES"), 60, 5, 120);
+const RECHECK_MINUTES = clamp(env("RECHECK_MINUTES"), 15, 5, 60);
 
 const MS = "https://login.microsoftonline.com";
 const ISSUER = `${MS}/${TENANT}/v2.0`;
@@ -150,21 +156,24 @@ async function revoke(jti: string, login: number): Promise<void> {
 }
 
 // ------------------------------------------------------------------ sessions
-type Session = { oid: string; tid: string; email: string; name: string; jti: string; login: number; iat: number };
+/** login = time of the interactive sign-in (start of the hard lifetime).
+ *  chk   = last time Microsoft confirmed this user may still sign in (and is in the access group). */
+type Session = { oid: string; tid: string; email: string; name: string; jti: string; login: number; chk: number; iat: number };
 
 /** Expires at the idle timeout, but never later than the hard lifetime measured from the original sign-in. */
 async function mintSession(s: Omit<Session, "iat">, origin: string): Promise<{ token: string; maxAge: number }> {
   const now = nowSec();
   const exp = Math.min(now + IDLE_MINUTES * 60, s.login + SESSION_HOURS * 3600);
-  const token = await new SignJWT({ tid: s.tid, email: s.email, name: s.name, login: s.login })
+  const token = await new SignJWT({ tid: s.tid, email: s.email, name: s.name, login: s.login, chk: s.chk, grp: GROUP_ID })
     .setProtectedHeader({ alg: "HS256" }).setSubject(s.oid).setJti(s.jti).setIssuer(origin).setAudience(SESSION_AUD)
     .setIssuedAt(now).setExpirationTime(exp).sign(secretKey());
   return { token, maxAge: Math.max(0, exp - now) };
 }
 
 /** Returns the session only if every check passes; otherwise null (signed out).
- *  Signature (HS256 only), issuer, audience, expiry, idle age, hard lifetime, tenant, user id and
- *  sign-in domain are all required. Revocation is checked by the caller. */
+ *  Signature (HS256 only), issuer, audience, expiry, idle age, hard lifetime, tenant, user id,
+ *  sign-in domain and the access-group policy it was issued under are all required.
+ *  Revocation and the freshness of the access check (chk) are enforced by the caller. */
 async function readSession(token: string | undefined, origin: string): Promise<Session | null> {
   if (!token) return null;
   try {
@@ -178,11 +187,14 @@ async function readSession(token: string | undefined, origin: string): Promise<S
     const login = typeof payload.login === "number" ? payload.login : 0;
     const jti = typeof payload.jti === "string" ? payload.jti : "";
     const iat = typeof payload.iat === "number" ? payload.iat : 0;
-    if (!oid || !jti || !iat || !login) return null;
+    const chk = typeof payload.chk === "number" ? payload.chk : 0;
+    if (!oid || !jti || !iat || !login || !chk) return null;
+    // Issued under a different group rule (restriction added, changed or removed since): not valid.
+    if (payload.grp !== GROUP_ID) return null;
     if (tid !== TENANT) return null;
     if (!email.endsWith("@" + DOMAIN)) return null;
     if (now >= login + SESSION_HOURS * 3600) return null;
-    return { oid, tid, email, name: String(payload.name || ""), jti, login, iat };
+    return { oid, tid, email, name: String(payload.name || ""), jti, login, chk, iat };
   } catch {
     return null;
   }
@@ -220,11 +232,15 @@ async function csrfValid(token: string, sess: Session, origin: string): Promise<
 }
 
 // ------------------------------------------------------------------ sign-in
-async function startLogin(origin: string) {
+/** Starts a Microsoft sign-in. With `recheck` (an existing session) the request is silent (prompt=none):
+ *  Microsoft re-issues a token only if the account is still enabled and still allowed to use this app,
+ *  and the callback re-applies every authorization rule, including group membership. */
+async function startLogin(origin: string, recheck: Session | null = null) {
   const state = randomString(16);
   const nonce = randomString(16);
   const verifier = randomString(48);
-  const flow = await new SignJWT({ state, nonce, verifier })
+  const silent = recheck ? { silent: true, oid: recheck.oid, login: recheck.login, jti: recheck.jti } : {};
+  const flow = await new SignJWT({ state, nonce, verifier, ...silent })
     .setProtectedHeader({ alg: "HS256" }).setIssuer(origin).setAudience(SESSION_AUD)
     .setIssuedAt().setExpirationTime("10m").sign(secretKey());
   // Destination: Microsoft's authorize endpoint for our tenant (a constant). Only query parameters are added.
@@ -239,18 +255,18 @@ async function startLogin(origin: string) {
     nonce,
     code_challenge: await sha256(verifier),
     code_challenge_method: "S256",
-    prompt: "select_account",
+    ...(recheck ? { prompt: "none", login_hint: recheck.email } : { prompt: "select_account" }),
   }).toString();
-  // Also drop any stale session cookie.
-  return safeRedirect(dest, origin, [cookie(FLOW_COOKIE, flow, 600), cookie(SESSION_COOKIE, "", 0)]);
+  // An interactive sign-in also drops any stale session cookie.
+  const cookies = [cookie(FLOW_COOKIE, flow, 600)];
+  if (!recheck) cookies.push(cookie(SESSION_COOKIE, "", 0));
+  return safeRedirect(dest, origin, cookies);
 }
 
 async function finishLogin(req: Request, url: URL, origin: string) {
   const clearFlow = [cookie(FLOW_COOKIE, "", 0)];
-  const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
   const flowCookie = readCookie(req, FLOW_COOKIE);
-  if (!code || !state || !flowCookie) return deny("Sign-in did not complete. Please try again.", 400, clearFlow);
+  if (!flowCookie) return deny("Sign-in did not complete. Please try again.", 400, clearFlow);
 
   let flow: Record<string, unknown>;
   try {
@@ -260,8 +276,26 @@ async function finishLogin(req: Request, url: URL, origin: string) {
   } catch {
     return deny("Sign-in expired. Please try again.", 400, clearFlow);
   }
+  const silent = flow.silent === true;
+  // When a silent re-authorization fails for any reason the old session must not survive it.
+  const endSession = [...clearFlow, cookie(SESSION_COOKIE, "", 0)];
+  const refuse = async (message: string, status: number) => {
+    if (silent && typeof flow.jti === "string" && typeof flow.login === "number") await revoke(flow.jti, flow.login);
+    return deny(message, status, silent ? endSession : clearFlow);
+  };
+
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  // Login-CSRF check. A callback whose `state` does not match the signed flow cookie did not come from
+  // the sign-in we started, so it must not be able to change anything (it cannot end a session either).
   if (typeof flow.state !== "string" || flow.state !== state || typeof flow.verifier !== "string" || typeof flow.nonce !== "string") {
     return deny("Sign-in could not be validated. Please try again.", 400, clearFlow);
+  }
+  if (!code) {
+    // Microsoft declined (for a silent attempt: signed out there, account disabled, or no longer assigned).
+    // Fall back to a normal interactive sign-in, which starts a brand-new session if it succeeds.
+    if (silent) return await startLogin(origin);
+    return await refuse("Sign-in did not complete. Please try again.", 400);
   }
 
   const tr = await fetch(TOKEN_URL, {
@@ -276,7 +310,7 @@ async function finishLogin(req: Request, url: URL, origin: string) {
       code_verifier: flow.verifier,
     }),
   });
-  if (!tr.ok) return deny("Microsoft rejected the sign-in. Please try again.", 401, clearFlow);
+  if (!tr.ok) return await refuse("Microsoft rejected the sign-in. Please try again.", 401);
   const tokens = await tr.json();
 
   let claims: Record<string, unknown>;
@@ -285,27 +319,37 @@ async function finishLogin(req: Request, url: URL, origin: string) {
       issuer: ISSUER, audience: CLIENT_ID, algorithms: ["RS256"], maxTokenAge: "10m", clockTolerance: 60,
     })).payload;
   } catch {
-    return deny("The sign-in token could not be verified.", 401, clearFlow);
+    return await refuse("The sign-in token could not be verified.", 401);
   }
 
-  // ---- authorization: who is allowed in ----
+  // ---- authorization: who is allowed in (applied on every sign-in AND every silent re-check) ----
   // Identity is the immutable tenant id + object id from the verified token (not the email address).
   const tid = typeof claims.tid === "string" ? claims.tid : "";
   const oid = typeof claims.oid === "string" ? claims.oid : "";
-  if (claims.nonce !== flow.nonce) return deny("The sign-in response did not match the request.", 401, clearFlow);
-  if (tid !== TENANT || !oid) return deny("This account is not part of the company directory.", 403, clearFlow);
+  if (claims.nonce !== flow.nonce) return await refuse("The sign-in response did not match the request.", 401);
+  if (tid !== TENANT || !oid) return await refuse("This account is not part of the company directory.", 403);
   const email = String(claims.preferred_username || claims.email || "").toLowerCase();
-  if (!email.endsWith("@" + DOMAIN)) return deny("Only company accounts can view this dashboard.", 403, clearFlow);
+  if (!email.endsWith("@" + DOMAIN)) return await refuse("Only company accounts can view this dashboard.", 403);
   if (GROUP_ID) {
     // Membership must be asserted in the token. A missing or truncated ("overage") groups claim is a refusal.
     const groups = Array.isArray(claims.groups) ? claims.groups.filter((g): g is string => typeof g === "string") : null;
     if (!groups || !groups.includes(GROUP_ID)) {
-      return deny("Your account is not in the dashboard access group. Ask IT to add you.", 403, clearFlow);
+      return await refuse("Your account is not in the dashboard access group. Ask IT to add you.", 403);
     }
   }
 
-  const { token, maxAge } = await mintSession(
-    { oid, tid, email, name: String(claims.name || ""), jti: randomString(16), login: nowSec() }, origin);
+  const now = nowSec();
+  let login = now, jti = randomString(16);
+  if (silent) {
+    // A re-check continues the same session: same user, same session id, same hard-lifetime clock.
+    if (flow.oid !== oid) return await refuse("A different account is signed in. Please sign in again.", 403);
+    if (typeof flow.login !== "number" || typeof flow.jti !== "string" || now >= flow.login + SESSION_HOURS * 3600) {
+      return await startLogin(origin);
+    }
+    login = flow.login;
+    jti = flow.jti;
+  }
+  const { token, maxAge } = await mintSession({ oid, tid, email, name: String(claims.name || ""), jti, login, chk: now }, origin);
   // Signed in: always this site's home page. Nothing in the callback request selects the destination.
   return safeRedirect(homeUrl(origin), origin, [cookie(SESSION_COOKIE, token, maxAge), ...clearFlow]);
 }
@@ -386,6 +430,13 @@ export default async (req: Request, context: Context) => {
     if (!sess) {
       if (!isRead) return new Response("Sign in required", { status: 401, headers: SECURITY_HEADERS });
       return await startLogin(origin);
+    }
+
+    // Authorization must be fresh. If Microsoft last confirmed this user more than RECHECK_MINUTES ago,
+    // nothing is served until it confirms again (silent redirect; group membership is re-evaluated).
+    if (nowSec() - sess.chk > RECHECK_MINUTES * 60) {
+      if (!isRead) return new Response("Access must be re-verified; reload the page", { status: 401, headers: SECURITY_HEADERS });
+      return await startLogin(origin, sess);
     }
 
     // Authorized: serve the page, never cached, and renew the cookie once half the idle window has passed.
