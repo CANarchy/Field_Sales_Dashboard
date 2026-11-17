@@ -1,0 +1,16 @@
+# Field Survey Dashboard – Netlify configuration
+[build]
+  publish = "dist"
+
+# Every request (including index.html) passes through the Entra ID sign-in check first.
+[[edge_functions]]
+  function = "auth"
+  path = "/*"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cache-Control = "private, no-store"
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
