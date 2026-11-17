@@ -34,6 +34,7 @@ const LOGOUT = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/logout`;
 const JWKS = createRemoteJWKSet(new URL(`https://login.microsoftonline.com/${TENANT}/discovery/v2.0/keys`));
 
 const SESSION_COOKIE = "fsd_session";
+const SESSION_AUD = "field-survey-dashboard";
 const FLOW_COOKIE = "fsd_flow";
 const CALLBACK_PATH = "/.auth/callback";
 const LOGOUT_PATH = "/.auth/logout";
@@ -66,13 +67,24 @@ function deny(msg: string, status = 403) {
   );
 }
 
+/** Only an absolute path on this site is accepted as a post-login destination (CWE-601). */
+function safeReturnPath(candidate: unknown, origin: string): string {
+  if (typeof candidate !== "string" || !candidate.startsWith("/") || candidate.startsWith("//") || candidate.includes("\\")) return "/";
+  try {
+    const u = new URL(candidate, origin);
+    return u.origin === origin ? u.pathname + u.search : "/";
+  } catch {
+    return "/";
+  }
+}
+
 async function startLogin(url: URL) {
   const state = randomString(16);
   const verifier = randomString(48);
   const challenge = await sha256(verifier);
   const returnTo = url.pathname + url.search;
   const flow = await new SignJWT({ state, verifier, returnTo })
-    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("10m").sign(secretKey());
+    .setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("10m").sign(secretKey());
   const p = new URLSearchParams({
     client_id: CLIENT_ID,
     response_type: "code",
@@ -94,7 +106,7 @@ async function finishLogin(req: Request, url: URL) {
   if (!code || !state || !flowCookie) return deny("Sign-in did not complete. Please try again.", 400);
   let flow: { state?: string; verifier?: string; returnTo?: string };
   try {
-    flow = (await jwtVerify(flowCookie, secretKey())).payload as typeof flow;
+    flow = (await jwtVerify(flowCookie, secretKey(), { algorithms: ["HS256"], maxTokenAge: "10m" })).payload as typeof flow;
   } catch {
     return deny("Sign-in expired. Please try again.", 400);
   }
@@ -114,7 +126,9 @@ async function finishLogin(req: Request, url: URL) {
 
   let claims: Record<string, unknown>;
   try {
-    claims = (await jwtVerify(tokens.id_token, JWKS, { issuer: ISSUER, audience: CLIENT_ID })).payload;
+    claims = (await jwtVerify(tokens.id_token, JWKS, {
+      issuer: ISSUER, audience: CLIENT_ID, algorithms: ["RS256"], maxTokenAge: "10m", clockTolerance: 60,
+    })).payload;
   } catch {
     return deny("Could not verify the sign-in token.", 401);
   }
@@ -126,9 +140,24 @@ async function finishLogin(req: Request, url: URL) {
   }
 
   const session = await new SignJWT({ email, name: claims.name || "" })
-    .setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime(`${SESSION_HOURS}h`).sign(secretKey());
-  const target = flow.returnTo && flow.returnTo.startsWith("/") ? flow.returnTo : "/";
+    .setProtectedHeader({ alg: "HS256" }).setIssuer(url.origin).setAudience(SESSION_AUD)
+    .setIssuedAt().setExpirationTime(`${SESSION_HOURS}h`).sign(secretKey());
+  const target = safeReturnPath(flow.returnTo, url.origin);
   return redirect(target, [cookie(SESSION_COOKIE, session, SESSION_HOURS * 3600), cookie(FLOW_COOKIE, "", 0)]);
+}
+
+/** A session is valid only if it was signed with our secret using HS256, is unexpired, was issued
+ *  for this site, and still names an allowed account. Anything else is treated as signed-out. */
+async function validSession(token: string, origin: string): Promise<boolean> {
+  try {
+    const { payload } = await jwtVerify(token, secretKey(), {
+      algorithms: ["HS256"], issuer: origin, audience: SESSION_AUD, maxTokenAge: `${SESSION_HOURS}h`,
+    });
+    const email = typeof payload.email === "string" ? payload.email.toLowerCase() : "";
+    return email.endsWith("@" + DOMAIN);
+  } catch {
+    return false; // expired, tampered, wrong algorithm, or foreign token
+  }
 }
 
 export default async (req: Request, context: Context) => {
@@ -143,14 +172,13 @@ export default async (req: Request, context: Context) => {
   }
 
   const session = readCookie(req, SESSION_COOKIE);
-  if (session) {
-    try {
-      const { payload } = await jwtVerify(session, secretKey());
+  if (session && (await validSession(session, url.origin))) {
+    {
       const res = await context.next();
       const out = new Response(res.body, res);
       out.headers.set("Cache-Control", "private, no-store");
       return out;
-    } catch { /* expired or tampered: fall through to a fresh login */ }
+    }
   }
   if (req.method !== "GET") return new Response("Sign in required", { status: 401 });
   return startLogin(url);

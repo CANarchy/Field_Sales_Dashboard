@@ -134,12 +134,12 @@ tpl = f'{REPO}/template/dashboard.html'
 inner = open(tpl, encoding='utf-8').read()
 m = re.search(r'(\d+)/(\d+)/\d+ thru (\d+)/(\d+)/\d+', ce_label)
 win = f'{m.group(1)}/{m.group(2)}–{m.group(3)}/{m.group(4)}' if m else ce_label
-inner = inner.replace('5/1–10/2 depletion window', win + ' depletion window')
+inner = inner.replace('5/1–10/2 depletion window', B.html_escape(win) + ' depletion window')
 d0, d1 = rows[0][2][:10], rows[-1][2][:10]
 foot = (f'Source: KARMA ResultsByForm export pulled {args.pulled} (surveys {d0} to {d1}) and Buyer Commitments export '
         f'1/1/2026–11/15/2026 · {len(rows):,} field surveys · {len(buy):,} commitment accounts; case equivalents {ce_label}. '
         'Energy (Coca-Cola system) distributors stripped per the approved parent list.')
-inner = re.sub(r'(<div class="foot">)[^<]*', lambda mm: mm.group(1) + foot, inner)
+inner = re.sub(r'(<div class="foot">)[^<]*', lambda mm: mm.group(1) + B.html_escape(foot), inner)
 os.makedirs(OUT, exist_ok=True)
 # reuse B.render with the patched template
 orig = B.render

@@ -248,19 +248,20 @@ def render(rows, buy, empmap, out_dir, subtitle=None):
     (netlify/edge-functions/auth.ts) against Microsoft Entra ID, so the page itself is plain HTML."""
     inner = open(os.path.join(HERE, 'template', 'dashboard.html'), encoding='utf-8').read()
 
-    def js(v):
-        # JSON that is safe to embed inside a <script> block: no sequence can close the tag
-        # or break the script (CWE-79), regardless of what the survey text contains.
-        return (json.dumps(v, ensure_ascii=False, separators=(',', ':'))
-                .replace('</', '<\\/').replace('<!--', '<\\!--')
-                .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029'))
-    inner = inner.replace('__ROWS__', js(rows)).replace('__BUY__', js(buy)).replace('__EMPMAP__', js(empmap))
+    inner = inner.replace('__DATA__', json_script(dict(rows=rows, buy=buy, empmap=empmap)))
     if subtitle:
         inner = re.sub(r'(<span id="siteSub">)[^<]*', lambda m: m.group(1) + html_escape(subtitle), inner)
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, 'index.html')
     open(path, 'w', encoding='utf-8').write(inner)
     return path
+
+def json_script(data):
+    """JSON for a <script type="application/json"> block: every '<', '>' and '&' is emitted as a
+    backslash-u escape, so the output can never contain a tag or entity whatever the data holds."""
+    out = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    return out.replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026') \
+              .replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
 
 def html_escape(t):
     return (str(t).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
