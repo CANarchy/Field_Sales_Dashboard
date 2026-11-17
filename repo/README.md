@@ -43,7 +43,6 @@ edge, so an unsigned-in visitor never receives the page or its data. Ask IT to c
 - **Supported account types**: *Accounts in this organizational directory only (single tenant)*
 - **Redirect URI** (platform *Web*): `https://mbrewfielddashboard.netlify.app/.auth/callback`
   (add the same path on any custom domain you later attach)
-- **Front-channel logout URL**: `https://mbrewfielddashboard.netlify.app/.auth/logout`
 - **Authentication → ID tokens**: leave the implicit grant boxes *unchecked* (the site uses the authorization-code flow with PKCE)
 - **Certificates & secrets**: create a client secret; note the *value* and its expiry (set a calendar reminder to rotate it)
 - **API permissions**: the default `User.Read` / `openid` / `profile` / `email` delegated permissions are enough; grant admin consent
@@ -70,10 +69,11 @@ IT gives you: Tenant ID, Application (client) ID, client secret value, and (opti
 
 Sessions are a signed, HttpOnly cookie that renews while the user is active and expires after `IDLE_MINUTES` of
 inactivity or `SESSION_HOURS` after login, whichever is first; nobody's password is ever stored or seen by the site.
-Visiting `/.auth/logout` signs out *and* revokes that session server-side (the session id is written to a Netlify Blobs
-store named `revoked-sessions`, which every request checks), so a copied cookie stops working at logout. Netlify Blobs
-is on by default; if the store is ever unreachable the function logs the error and falls back to expiry-only sessions
-rather than locking everyone out.
+The **Sign out** link in the toolbar opens `/.auth/logout`, which asks for confirmation; the sign-out itself is a
+same-site POST that revokes the session server-side (its id is written to a Netlify Blobs store named
+`revoked-sessions`, checked on every request) and then ends the Microsoft session, so a copied cookie stops working
+at logout. Netlify Blobs is on by default. If that store cannot be reached the site returns a 503 "temporarily
+unavailable" page instead of serving the dashboard (fails closed).
 
 ### 4. GitHub
 Create a private repo, push these files, then **Settings → Secrets and variables → Actions → New repository secret** for each:
@@ -112,10 +112,11 @@ Run the fixture build locally to check it still renders, then commit.
 
 ## Security notes (code-scanning findings, Nov 2026)
 - Survey text, photo labels and photo URLs come from KARMA and are treated as untrusted: they are HTML-escaped,
-  URLs are only used if they are `https://`, and thumbnails use data attributes + delegated handlers (no inline
+  URLs are only used if they are `https://` on the KARMA/VIP media hosts (`karma.vtinfo.com`, `api.vtinfo.com`), and thumbnails use data attributes + delegated handlers (no inline
   `onclick`/`onerror` built from data). The build escapes `</` inside the embedded JSON so a note can never close the
   `<script>` block.
-- Requests other than GET (the feedback form) must carry a same-site `Origin`/`Referer` header in addition to the
+- After sign-in the user always lands on `/`; no part of the request chooses the redirect target.
+- Requests other than GET (the feedback form, sign-out) must carry a same-site `Origin`/`Referer` header in addition to the
   `SameSite=Lax` session cookie, which blocks cross-site request forgery.
 - The Excel export library is loaded from cdnjs with a Subresource Integrity hash pinned to SheetJS 0.18.5, so a
   tampered copy will not run (the export then falls back to CSV).

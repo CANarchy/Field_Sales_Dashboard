@@ -278,7 +278,7 @@ svg path[data-i]:hover,svg circle[data-i]:hover{filter:brightness(1.15)}
     <div class="fitem"><span class="f-label">Premise</span><select id="premSel"><option value="">All</option></select></div>
     <div class="fitem"><span class="f-label">Follow up</span><select id="fuSel"><option value="">All</option><option value="YES">Yes — follow up required</option><option value="NO">No</option></select></div>
     <div class="fitem" style="justify-content:flex-end"><span class="f-label">&nbsp;</span><button class="reset" id="resetBtn">Reset</button></div>
-    <div class="fitem"><span class="f-label">&nbsp;</span><span style="display:flex;gap:8px"><button class="xbtn" id="snapBtn" type="button" title="Download a shareable image summary of the current view">Snapshot</button><button class="xbtn" id="helpBtn" type="button" title="How to use this dashboard">Help</button></span></div>
+    <div class="fitem"><span class="f-label">&nbsp;</span><span style="display:flex;gap:8px"><button class="xbtn" id="snapBtn" type="button" title="Download a shareable image summary of the current view">Snapshot</button><button class="xbtn" id="helpBtn" type="button" title="How to use this dashboard">Help</button><a class="reset" href="/.auth/logout" style="align-self:center">Sign out</a></span></div>
   </div></div>
 </header>
 
@@ -370,7 +370,7 @@ svg path[data-i]:hover,svg circle[data-i]:hover{filter:brightness(1.15)}
 
 <div id="lb" role="dialog" aria-modal="true" aria-label="Photo viewer">
   <button id="lbX" aria-label="Close">×</button>
-  <img id="lbImg" alt="">
+  <img id="lbImg" alt="" referrerpolicy="no-referrer">
   <div id="lbCap"></div>
   <div id="lbBar"><button id="lbPrev">‹ Prev</button><a id="lbOpen" target="_blank" rel="noopener">Open original</a><button id="lbNext">Next ›</button></div>
 </div>
@@ -387,7 +387,9 @@ const EMPMAP=__D.empmap;
 const MGRN=e=>(EMPMAP[e]||["",""])[1];
 const E=0,RO=1,DT=2,AC=3,CI=4,ST=5,PR=6,CO=7,CH=8,DI=9,NO=10,FU=11,ND=12,PH=13,VIP=14,AD=15,ZP=16,RW=17,BO=18,WW=19;
 const $=id=>document.getElementById(id);
-const safeUrl=u=>{try{const x=new URL(String(u));return x.protocol==='https:'?x.href:'';}catch(_){return '';}};
+// Photo links are only ever followed/loaded if they are https on the KARMA/VIP media hosts.
+const PHOTO_HOSTS=['karma.vtinfo.com','api.vtinfo.com'];
+const safeUrl=u=>{try{const x=new URL(String(u));return (x.protocol==='https:'&&PHOTO_HOSTS.includes(x.hostname)&&!x.username&&!x.password)?x.href:'';}catch(_){return '';}};
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const emps=[...new Set(ROWS.map(r=>r[E]))].sort();
@@ -602,7 +604,7 @@ function drawDetail(F){
   $('dSub').textContent=(state.sel?state.sel+' · ':'')+S.length+' survey'+(S.length===1?'':'s')+(S.length>DCAP?' — showing newest '+DCAP+' (use All Surveys to search the rest)':' · newest first');
   $('empGrid').innerHTML=S.slice(0,DCAP).map(r=>{
     const ps=photoSet(r);
-    const thumbs=r[PH].slice(0,4).map(([lab,url],i)=>`<img loading="lazy" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('')+(r[PH].length>4?`<span class="tag" style="align-self:center">+${r[PH].length-4} more</span>`:'');
+    const thumbs=r[PH].slice(0,4).map(([lab,url],i)=>`<img loading="lazy" referrerpolicy="no-referrer" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('')+(r[PH].length>4?`<span class="tag" style="align-self:center">+${r[PH].length-4} more</span>`:'');
     return `<div class="emp"><div class="eh"><b>${esc(r[AC])}</b><span class="m">${esc(r[DT])}</span></div>
       <div class="body">
         <div class="acct">${esc(r[E])} <span style="font-weight:400;color:var(--mut)">· ${esc(r[RO]||'')}</span></div>
@@ -674,7 +676,7 @@ function drawTable(F){
   $('tCount').textContent=S.length>CAP?('showing newest '+CAP+' of '+S.length+' — refine search to narrow'):'';
   $('tBody').innerHTML=S.slice(0,CAP).map(r=>{
     const ps=photoSet(r);
-    const th=r[PH].map(([lab,url],i)=>`<img class="tthumb" loading="lazy" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('');
+    const th=r[PH].map(([lab,url],i)=>`<img class="tthumb" loading="lazy" referrerpolicy="no-referrer" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('');
     return `<tr><td style="white-space:nowrap">${esc(r[DT])}</td><td title="${esc(MGRN(r[E])?'Manager: '+MGRN(r[E]):'')}">${esc(r[E])}${MGRN(r[E])?'<div style="font-family:var(--mono);font-size:9px;color:var(--mut)">Mgr: '+esc(MGRN(r[E]))+'</div>':''}</td><td>${esc(r[RO])}</td><td><b>${esc(r[AC])}</b>${r[VIP]?'<div style="font-family:var(--mono);font-size:9.5px;color:var(--mut)">VIP '+esc(r[VIP])+'</div>':''}</td><td>${esc(r[AD])}</td><td>${esc(r[CI])}</td><td>${esc(r[ST])}</td><td>${esc(r[PR])}</td><td>${esc(r[CO])}</td><td>${esc(r[CH])}</td><td>${esc(r[DI])}</td><td>${esc(r[RW])}</td><td>${r[FU]==='YES'?'<span class="tag g">YES</span>':esc(r[FU]||'')}</td><td>${r[ND]==='YES'?'<span class="tag g">YES</span>':esc(r[ND]||'')}</td><td>${r[BO]==='YES'?'<span class="tag g">YES</span>':esc(r[BO]||'')}</td><td>${r[WW]==='YES'?'<span class="tag g">YES</span>':esc(r[WW]||'')}</td><td class="notes">${esc(r[NO])}</td><td style="min-width:145px">${th}</td></tr>`;
   }).join('')||`<tr><td colspan="18" class="empty">No surveys match${state.sel?' in '+state.sel+' — click the state again or hit Reset to search all states':''}.</td></tr>`;
 }

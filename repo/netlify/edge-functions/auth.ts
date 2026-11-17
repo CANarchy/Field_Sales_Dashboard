@@ -16,9 +16,9 @@
 //   SESSION_HOURS        optional: absolute session lifetime in hours (default 8)
 //   IDLE_MINUTES         optional: sign in again after this long without activity (default 60)
 //
-// Sessions are revocable: /.auth/logout records the session id in a Netlify Blobs store
-// ("revoked-sessions") and every request checks it, so a signed-out cookie is dead immediately
-// even though it has not reached its expiry time.
+// Sessions are revocable: signing out (a same-origin POST to /.auth/logout) records the session id
+// in a Netlify Blobs store ("revoked-sessions") and every request checks it, so a signed-out cookie
+// is dead immediately. If that store cannot be reached the request is refused (fails closed).
 
 import type { Config, Context } from "https://edge.netlify.com/v1/index.ts";
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "npm:jose@5.9.6";
@@ -44,6 +44,7 @@ const SESSION_COOKIE = "fsd_session";
 const SESSION_AUD = "field-survey-dashboard";
 const REVOKED = () => getStore({ name: "revoked-sessions", consistency: "strong" });
 const FLOW_COOKIE = "fsd_flow";
+const HOME_PATH = "/";
 const CALLBACK_PATH = "/.auth/callback";
 const LOGOUT_PATH = "/.auth/logout";
 
@@ -70,28 +71,31 @@ function deny(msg: string, status = 403) {
     `<!doctype html><meta charset="utf-8"><title>Access denied</title>
 <body style="font-family:system-ui;background:#131512;color:#ECEFE6;padding:40px">
 <h1 style="color:#92D400">Field Survey Dashboard</h1><p>${msg}</p>
-<p><a style="color:#92D400" href="${LOGOUT_PATH}">Sign in with a different account</a></p></body>`,
+<p><a style="color:#92D400" href="${HOME_PATH}">Try again / use a different account</a></p></body>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
   );
 }
 
-/** Only an absolute path on this site is accepted as a post-login destination (CWE-601). */
-function safeReturnPath(candidate: unknown, origin: string): string {
-  if (typeof candidate !== "string" || !candidate.startsWith("/") || candidate.startsWith("//") || candidate.includes("\\")) return "/";
-  try {
-    const u = new URL(candidate, origin);
-    return u.origin === origin ? u.pathname + u.search : "/";
-  } catch {
-    return "/";
-  }
+/** GET /.auth/logout: a confirmation page. The sign-out itself is a same-origin POST, so another
+ *  site cannot sign a user out (or probe the endpoint) with a link or an image tag. */
+function logoutPage(signedIn: boolean) {
+  const body = signedIn
+    ? `<form method="post" action="${LOGOUT_PATH}"><button style="background:#92D400;border:0;border-radius:4px;padding:10px 22px;font-weight:700;cursor:pointer" type="submit">Sign out</button></form>
+<p><a style="color:#92D400" href="${HOME_PATH}">Back to the dashboard</a></p>`
+    : `<p>You are signed out.</p><p><a style="color:#92D400" href="${HOME_PATH}">Sign in</a></p>`;
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><title>Sign out</title>
+<body style="font-family:system-ui;background:#131512;color:#ECEFE6;padding:40px">
+<h1 style="color:#92D400">Field Survey Dashboard</h1>${body}</body>`,
+    { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
+  );
 }
 
 async function startLogin(url: URL) {
   const state = randomString(16);
   const verifier = randomString(48);
   const challenge = await sha256(verifier);
-  const returnTo = url.pathname + url.search;
-  const flow = await new SignJWT({ state, verifier, returnTo })
+  const flow = await new SignJWT({ state, verifier })
     .setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("10m").sign(secretKey());
   const p = new URLSearchParams({
     client_id: CLIENT_ID,
@@ -112,7 +116,7 @@ async function finishLogin(req: Request, url: URL) {
   const state = url.searchParams.get("state");
   const flowCookie = readCookie(req, FLOW_COOKIE);
   if (!code || !state || !flowCookie) return deny("Sign-in did not complete. Please try again.", 400);
-  let flow: { state?: string; verifier?: string; returnTo?: string };
+  let flow: { state?: string; verifier?: string };
   try {
     flow = (await jwtVerify(flowCookie, secretKey(), { algorithms: ["HS256"], maxTokenAge: "10m" })).payload as typeof flow;
   } catch {
@@ -148,12 +152,12 @@ async function finishLogin(req: Request, url: URL) {
   }
 
   const now = Math.floor(Date.now() / 1000);
-  const session = await mintSession({ email, name: String(claims.name || ""), jti: randomString(16), login: now }, url.origin);
-  const target = safeReturnPath(flow.returnTo, url.origin);
-  return redirect(target, [cookie(SESSION_COOKIE, session, IDLE_MINUTES * 60), cookie(FLOW_COOKIE, "", 0)]);
+  const session = await mintSession({ email, name: String(claims.name || ""), jti: randomString(16), login: now, iat: now }, url.origin);
+  // Fixed destination: the dashboard is a single page, so nothing from the request chooses where to go.
+  return redirect(HOME_PATH, [cookie(SESSION_COOKIE, session, IDLE_MINUTES * 60), cookie(FLOW_COOKIE, "", 0)]);
 }
 
-type Session = { email: string; name: string; jti: string; login: number };
+type Session = { email: string; name: string; jti: string; login: number; iat: number };
 
 /** Expiry = idle timeout from now, capped at the absolute lifetime measured from the original login. */
 async function mintSession(sess: Session, origin: string): Promise<string> {
@@ -164,27 +168,32 @@ async function mintSession(sess: Session, origin: string): Promise<string> {
     .setIssuedAt(now).setExpirationTime(exp).sign(secretKey());
 }
 
+class StoreUnavailable extends Error {}
+
+/** Throws StoreUnavailable if the store cannot be reached: the caller must refuse the request
+ *  (fail closed) rather than assume the session is still good. */
 async function isRevoked(jti: string): Promise<boolean> {
   try {
     return (await REVOKED().get(jti)) !== null;
   } catch (e) {
     console.error("revocation store unavailable:", e);
-    return false;
+    throw new StoreUnavailable();
   }
 }
 
-async function revoke(jti: string, login: number) {
+async function revoke(jti: string, login: number): Promise<void> {
   try {
     // keep the marker until the session could no longer be valid anyway
     await REVOKED().setJSON(jti, { revokedAt: Date.now(), expires: (login + SESSION_HOURS * 3600) * 1000 });
   } catch (e) {
     console.error("could not record logout:", e);
+    throw new StoreUnavailable();
   }
 }
 
 /** A session is valid only if it was signed with our secret using HS256, is unexpired, was issued
- *  for this site, names an allowed account, is within the absolute lifetime, and has not been
- *  revoked by a logout. Anything else is treated as signed-out. */
+ *  for this site, names an allowed account and is within the absolute lifetime. Revocation is
+ *  checked separately by the caller so that a store outage is refused, not ignored. */
 async function validSession(token: string, origin: string): Promise<Session | null> {
   try {
     const { payload } = await jwtVerify(token, secretKey(), {
@@ -194,8 +203,7 @@ async function validSession(token: string, origin: string): Promise<Session | nu
     const login = typeof payload.login === "number" ? payload.login : 0;
     const now = Math.floor(Date.now() / 1000);
     if (!email.endsWith("@" + DOMAIN) || !payload.jti || !login || now > login + SESSION_HOURS * 3600) return null;
-    if (await isRevoked(payload.jti)) return null;
-    return { email, name: String(payload.name || ""), jti: payload.jti, login };
+    return { email, name: String(payload.name || ""), jti: payload.jti, login, iat: Number(payload.iat || now) };
   } catch {
     return null; // expired, tampered, wrong algorithm, or foreign token
   }
@@ -218,29 +226,39 @@ export default async (req: Request, context: Context) => {
   }
   if (url.pathname === CALLBACK_PATH) return finishLogin(req, url);
   const cookieVal = readCookie(req, SESSION_COOKIE);
-  const sess = cookieVal ? await validSession(cookieVal, url.origin) : null;
+  const parsed = cookieVal ? await validSession(cookieVal, url.origin) : null;
+  const isRead = req.method === "GET" || req.method === "HEAD";
 
-  if (url.pathname === LOGOUT_PATH) {
-    if (sess) await revoke(sess.jti, sess.login);
-    const back = encodeURIComponent(url.origin + "/");
-    return redirect(`${LOGOUT}?post_logout_redirect_uri=${back}`, [cookie(SESSION_COOKIE, "", 0)]);
+  // Anything that changes state must come from this site (CSRF guard), signed in or not.
+  if (!isRead && !sameOrigin(req, url.origin)) return new Response("Cross-site request blocked", { status: 403 });
+
+  let sess: Session | null = null;
+  try {
+    if (parsed && !(await isRevoked(parsed.jti))) sess = parsed;
+
+    if (url.pathname === LOGOUT_PATH) {
+      if (req.method !== "POST") return logoutPage(!!sess);
+      // Revoke first; only then drop the cookie and end the Microsoft session.
+      if (parsed) await revoke(parsed.jti, parsed.login);
+      const back = encodeURIComponent(url.origin + HOME_PATH);
+      return redirect(`${LOGOUT}?post_logout_redirect_uri=${back}`, [cookie(SESSION_COOKIE, "", 0)]);
+    }
+  } catch (e) {
+    if (e instanceof StoreUnavailable) {
+      return deny("The sign-in service is temporarily unavailable. Please try again in a minute.", 503);
+    }
+    throw e;
   }
 
   if (sess) {
-    if (req.method !== "GET" && req.method !== "HEAD" && !sameOrigin(req, url.origin)) {
-      return new Response("Cross-site request blocked", { status: 403 });
-    }
     const res = await context.next();
     const out = new Response(res.body, res);
     out.headers.set("Cache-Control", "private, no-store");
     // sliding renewal: refresh the cookie once half the idle window has passed
     const now = Math.floor(Date.now() / 1000);
     const remaining = sess.login + SESSION_HOURS * 3600 - now;
-    if (remaining > 0) {
-      const iat = Number((await jwtVerify(cookieVal!, secretKey(), { algorithms: ["HS256"] })).payload.iat || now);
-      if (now - iat > (IDLE_MINUTES * 60) / 2) {
-        out.headers.append("Set-Cookie", cookie(SESSION_COOKIE, await mintSession(sess, url.origin), Math.min(IDLE_MINUTES * 60, remaining)));
-      }
+    if (remaining > 0 && now - sess.iat > (IDLE_MINUTES * 60) / 2) {
+      out.headers.append("Set-Cookie", cookie(SESSION_COOKIE, await mintSession(sess, url.origin), Math.min(IDLE_MINUTES * 60, remaining)));
     }
     return out;
   }
