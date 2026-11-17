@@ -2,10 +2,9 @@
 [build]
   publish = "dist"
 
-# Every request (including index.html) passes through the Entra ID sign-in check first.
-[[edge_functions]]
-  function = "auth"
-  path = "/*"
+# Access control lives in netlify/edge-functions/auth.ts. That file declares its own route
+# (path "/*", onError "fail"), so every request passes the Entra ID check before anything is
+# served, and a crash in the function returns an error page instead of bypassing the check.
 
 [[headers]]
   for = "/*"

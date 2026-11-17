@@ -390,6 +390,7 @@ const $=id=>document.getElementById(id);
 // Photo links are only ever followed/loaded if they are https on the KARMA/VIP media hosts.
 const PHOTO_HOSTS=['karma.vtinfo.com','api.vtinfo.com'];
 const safeUrl=u=>{try{const x=new URL(String(u));return (x.protocol==='https:'&&PHOTO_HOSTS.includes(x.hostname)&&!x.username&&!x.password)?x.href:'';}catch(_){return '';}};
+function setTip(tip,head,rest){const b=document.createElement('b');b.textContent=head;tip.replaceChildren(b,document.createTextNode(rest));}
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const emps=[...new Set(ROWS.map(r=>r[E]))].sort();
@@ -419,7 +420,10 @@ $('fuSel').onchange=e=>{state.fu=e.target.value;render();};
 function fmtd(d){const p=d.split('-');return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+p[1]-1]+' '+(+p[2]);}
 function setRange(f,t){state.from=f;state.to=t;$('calLbl').textContent=(f===DMIN&&t===DMAXR)?('Full period \u00b7 '+fmtd(DMIN)+' \u2013 '+fmtd(DMAXR)):(fmtd(f)+' \u2013 '+fmtd(t));render();}
 function fmtdy(d){return fmtd(d)+', '+d.slice(0,4);}
-$('siteSub').innerHTML='KARMA surveys \u00b7 alcohol accounts \u00b7 data: <b style="color:#4C8A00">'+fmtdy(DMIN)+' \u2013 '+fmtdy(DMAXR)+'</b> \u00b7 last survey '+fmtdy(DMAXR);
+(function(){const sub=$('siteSub'),b=document.createElement('b');b.style.color='#4C8A00';
+  b.textContent=fmtdy(DMIN)+' \u2013 '+fmtdy(DMAXR);
+  sub.textContent='KARMA surveys \u00b7 alcohol accounts \u00b7 data: ';
+  sub.append(b,document.createTextNode(' \u00b7 last survey '+fmtdy(DMAXR)));})();
 $('calLbl').textContent='Full period \u00b7 '+fmtd(DMIN)+' \u2013 '+fmtd(DMAXR);
 $('winSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   $('winSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
@@ -452,7 +456,7 @@ function calRender(){
       if(a||b)cls='end';
       else if(selA&&selB&&dd>selA&&dd<selB)cls='inr';
     }
-    h+='<button class="'+cls+'" data-d="'+dd+'" '+(cls==='dis'?'disabled':'')+'>'+d+'</button>';
+    h+='<button class="'+cls+'" data-d="'+esc(dd)+'" '+(cls==='dis'?'disabled':'')+'>'+Number(d)+'</button>';
   }
   $('calGrid').innerHTML=h;
   $('calSelTxt').textContent=selA?(fmtd(selA)+(selB?' \u2013 '+fmtd(selB):' \u2013 \u2026')):'pick start date';
@@ -494,7 +498,7 @@ function drawKPIs(F){
     ['Accounts',accts,'unique visited'],
     ['Follow-ups',fu,'flagged required','warn'],
     ['Photos',ph,'captured'],
-  ].map(([l,v,s,w])=>`<div class="kpi ${w||''}"><div class="v">${v}</div><div class="l">${l}</div><div class="s">${s}</div></div>`).join('');
+  ].map(([l,v,s,w])=>`<div class="kpi ${w==='warn'?'warn':''}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div><div class="s">${esc(s)}</div></div>`).join('');
 }
 
 const ramp=t=>{const S=[[42,50,38],[146,212,0],[221,255,148]];
@@ -528,7 +532,7 @@ function drawMap(F){
       if(state.sel)document.querySelector('.detail').scrollIntoView({behavior:'smooth',block:'nearest'});};
     el.onclick=go;el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}};
     el.onmousemove=e=>{const r=map.getBoundingClientRect();
-      tip.innerHTML=a?`<b>${st}</b> · ${a.n} surveys · ${a.acc.size} accounts`:`<b>${st}</b> · no surveys`;
+      setTip(tip,st,a?` · ${a.n} surveys · ${a.acc.size} accounts`:' · no surveys');
       tip.style.display='block';
       tip.style.left=Math.min(e.clientX-r.left+14,r.width-tip.offsetWidth-6)+'px';
       tip.style.top=(e.clientY-r.top+14)+'px';};
@@ -554,7 +558,7 @@ function pie(elId,counts,total,key){
       :`<path data-i="${i}"${cls} d="M55,55 L${x0.toFixed(1)},${y0.toFixed(1)} A45,45 0 ${big} 1 ${x1.toFixed(1)},${y1.toFixed(1)} Z" fill="${PAL[i%PAL.length]}" stroke="#1B1B1B" stroke-width="2"/>`;
     a0=a1;});
   el.innerHTML=`<svg width="190" height="190" viewBox="0 0 110 110">${paths}</svg>
-    <div class="plegend">${top.map(([k,v],i)=>`<div data-i="${i}"${selVal&&k===selVal?' class="selrow"':''}><span style="display:flex;min-width:0"><span class="sw" style="background:${PAL[i%PAL.length]}"></span><span class="n">${esc(k||'\u2014')}</span></span><span class="m">${v} \u00b7 ${Math.round(100*v/total)}%</span></div>`).join('')}</div>`;
+    <div class="plegend">${top.map(([k,v],i)=>`<div data-i="${i}"${selVal&&k===selVal?' class="selrow"':''}><span style="display:flex;min-width:0"><span class="sw" style="background:${PAL[i%PAL.length]}"></span><span class="n">${esc(k||'\u2014')}</span></span><span class="m">${esc(v)} \u00b7 ${Math.round(100*v/total)}%</span></div>`).join('')}</div>`;
   if(key){const names=top.map(([k])=>k);
     el.querySelectorAll('[data-i]').forEach(n=>{const nm=names[+n.dataset.i];
       if(nm==='Other'){n.style.cursor='default';return;}
@@ -570,7 +574,7 @@ window.pieClick=function(key,v){
 function bars(elId,counts,n){
   const el=$(elId);const items=Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,n);
   const hi=items.length?items[0][1]:1;
-  el.innerHTML=items.map(([k,v])=>`<div class="brow"><span class="n" title="${esc(k)}">${esc(k||'—')}</span><span class="bar" style="width:${Math.round(58*v/hi)}%"></span><span class="m">${v}</span></div>`).join('')||'<div class="empty">Nothing in view.</div>';
+  el.innerHTML=items.map(([k,v])=>`<div class="brow"><span class="n" title="${esc(k)}">${esc(k||'—')}</span><span class="bar" style="width:${Math.round(58*v/hi)}%"></span><span class="m">${esc(v)}</span></div>`).join('')||'<div class="empty">Nothing in view.</div>';
 }
 function drawCharts(F){
   const S=inState(F);$('mixSub').textContent=(state.sel?state.sel+' · ':'')+(state.region?state.region+' · ':'')+S.length+' surveys · click a slice to filter';
@@ -604,7 +608,7 @@ function drawDetail(F){
   $('dSub').textContent=(state.sel?state.sel+' · ':'')+S.length+' survey'+(S.length===1?'':'s')+(S.length>DCAP?' — showing newest '+DCAP+' (use All Surveys to search the rest)':' · newest first');
   $('empGrid').innerHTML=S.slice(0,DCAP).map(r=>{
     const ps=photoSet(r);
-    const thumbs=r[PH].slice(0,4).map(([lab,url],i)=>`<img loading="lazy" referrerpolicy="no-referrer" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('')+(r[PH].length>4?`<span class="tag" style="align-self:center">+${r[PH].length-4} more</span>`:'');
+    const thumbs=r[PH].slice(0,4).map(([lab,url],i)=>`<img loading="lazy" referrerpolicy="no-referrer" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('')+(r[PH].length>4?`<span class="tag" style="align-self:center">+${Number(r[PH].length-4)} more</span>`:'');
     return `<div class="emp"><div class="eh"><b>${esc(r[AC])}</b><span class="m">${esc(r[DT])}</span></div>
       <div class="body">
         <div class="acct">${esc(r[E])} <span style="font-weight:400;color:var(--mut)">· ${esc(r[RO]||'')}</span></div>
@@ -678,7 +682,7 @@ function drawTable(F){
     const ps=photoSet(r);
     const th=r[PH].map(([lab,url],i)=>`<img class="tthumb" loading="lazy" referrerpolicy="no-referrer" src="${esc(direct(safeUrl(url)))}" alt="${esc(lab)}" title="${esc(lab)}" data-ps="${ps}" data-i="${i}" data-url="${esc(safeUrl(url))}" data-lab="${esc(lab)}">`).join('');
     return `<tr><td style="white-space:nowrap">${esc(r[DT])}</td><td title="${esc(MGRN(r[E])?'Manager: '+MGRN(r[E]):'')}">${esc(r[E])}${MGRN(r[E])?'<div style="font-family:var(--mono);font-size:9px;color:var(--mut)">Mgr: '+esc(MGRN(r[E]))+'</div>':''}</td><td>${esc(r[RO])}</td><td><b>${esc(r[AC])}</b>${r[VIP]?'<div style="font-family:var(--mono);font-size:9.5px;color:var(--mut)">VIP '+esc(r[VIP])+'</div>':''}</td><td>${esc(r[AD])}</td><td>${esc(r[CI])}</td><td>${esc(r[ST])}</td><td>${esc(r[PR])}</td><td>${esc(r[CO])}</td><td>${esc(r[CH])}</td><td>${esc(r[DI])}</td><td>${esc(r[RW])}</td><td>${r[FU]==='YES'?'<span class="tag g">YES</span>':esc(r[FU]||'')}</td><td>${r[ND]==='YES'?'<span class="tag g">YES</span>':esc(r[ND]||'')}</td><td>${r[BO]==='YES'?'<span class="tag g">YES</span>':esc(r[BO]||'')}</td><td>${r[WW]==='YES'?'<span class="tag g">YES</span>':esc(r[WW]||'')}</td><td class="notes">${esc(r[NO])}</td><td style="min-width:145px">${th}</td></tr>`;
-  }).join('')||`<tr><td colspan="18" class="empty">No surveys match${state.sel?' in '+state.sel+' — click the state again or hit Reset to search all states':''}.</td></tr>`;
+  }).join('')||`<tr><td colspan="18" class="empty">No surveys match${state.sel?' in '+esc(state.sel)+' — click the state again or hit Reset to search all states':''}.</td></tr>`;
 }
 
 const XCOLS=['Date','Employee','Role','Account','VIP ID','Address','City','ST','Zip','Premise','COT','Chain','Distributors','Riding With','Follow Up','New Display','Bonus Objectives','New W&W/POS','Notes','Photo Links'];
@@ -724,7 +728,7 @@ function drawBuyerMap(){
     const go=()=>{if(!v)return;state.sel=state.sel===st?null:st;drawBuyerMap();drawBuyer();};
     el.onclick=go;el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}};
     el.onmousemove=e=>{const r=map.getBoundingClientRect();
-      tip.innerHTML=a?`<b>${st}</b> · ${a.open} open of ${a.tot} commitments`:`<b>${st}</b> · no buyer commitments`;
+      setTip(tip,st,a?` · ${a.open} open of ${a.tot} commitments`:' · no buyer commitments');
       tip.style.display='block';
       tip.style.left=Math.min(e.clientX-r.left+14,r.width-tip.offsetWidth-6)+'px';
       tip.style.top=(e.clientY-r.top+14)+'px';};
@@ -799,7 +803,7 @@ function drawBuyer(){
   const pctF=nBlk?Math.round((nBlk-nOpen)/nBlk*100):0;
   $('bStats').innerHTML=[['Accounts surveyed',BUY.length,''],['Commitments',nCmt,''],
     ['Open items',nOpen,'warn'],['Fulfilled',nBlk-nOpen,''],['% commitments fulfilled',pctF+'%',pctF>=80?'':'warn'],['Case equivs delivered',Math.round(ce).toLocaleString(),'']]
-    .map(([l,v,w])=>`<div class="bstat ${w}"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+    .map(([l,v,w])=>`<div class="bstat ${w==='warn'?'warn':''}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
   $('bSub').textContent=(state.sel?state.sel+' · ':'')+BVIEW.length+' '+(bStatus?bStatus.toLowerCase():'total')+' item'+(BVIEW.length===1?'':'s');
   $('bCount').textContent='';
   $('bGrid').innerHTML=cards.map(({a,blocks})=>{
@@ -810,11 +814,11 @@ function drawBuyer(){
       <div class="body">
         <div class="meta">${esc(a.addr)}${a.addr?' · ':''}${esc(a.city)}, ${esc(a.st)} ${esc(a.zip)}</div>
         ${blocks.map(b=>`<div class="blk">
-          <span class="stchip ${b.status==='OPEN'?'open':'done'}">${b.status}</span>
+          <span class="stchip ${b.status==='OPEN'?'open':'done'}">${b.status==='OPEN'?'OPEN':'FULFILLED'}</span>
           <span class="tag">${esc(b.dc)}</span>
           ${b.dates&&b.dates.length?`<span class="tag">${esc(b.dates.length>1?b.dates[0]+' \u2192 '+b.dates[b.dates.length-1]:b.dates[0])}</span>`:''}
-          <span class="m" style="font-family:var(--mono);font-size:10px;color:var(--mut)">CE ${b.case_eq}</span>
-          ${b.commits.map(c=>`<div class="cmt"><span class="b">${esc(c.brand)}</span>${c.qty?' × '+c.qty:''}${c.loc?' · '+esc(c.loc):''}${c.instr?`<div style="color:var(--mut);font-size:11px">${esc(c.instr)}</div>`:''}</div>`).join('')}
+          <span class="m" style="font-family:var(--mono);font-size:10px;color:var(--mut)">CE ${esc(Number(b.case_eq)||0)}</span>
+          ${b.commits.map(c=>`<div class="cmt"><span class="b">${esc(c.brand)}</span>${c.qty?' × '+esc(Number(c.qty)||0):''}${c.loc?' · '+esc(c.loc):''}${c.instr?`<div style="color:var(--mut);font-size:11px">${esc(c.instr)}</div>`:''}</div>`).join('')}
           ${b.note?`<div class="cmt" style="color:#8A2A12">${esc(b.note)}</div>`:''}
           <div class="meta" style="margin-top:4px">Rep: ${esc(b.rep||b.contact.name||'—')}${b.rep&&MGRN(b.rep)?' · Mgr: '+esc(MGRN(b.rep)):''}${b.contact.spoke?' · spoke with '+esc(b.contact.spoke):''}${b.contact.phone?' · '+esc(b.contact.phone):''}</div>
         </div>`).join('')}

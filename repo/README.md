@@ -16,7 +16,7 @@ Power BI (Depletions) ───┘
 | `build_from_powerbi.py` | Pulls surveys + buyer commitments (KARMA model) and distributors, chain flags, case equivalents (Depletions model); renders the page |
 | `template/dashboard.html` | The dashboard itself (HTML/CSS/JS, logos, map) with `__ROWS__`, `__BUY__`, `__EMPMAP__` placeholders |
 | `netlify/edge-functions/auth.ts` | Company SSO: every request is checked at Netlify's edge against Microsoft Entra ID before the page is served |
-| `netlify.toml` | Tells Netlify to run the edge function on every path and to never cache the page |
+| `netlify.toml` | Publish directory and security headers (the edge function declares its own `/*` route) |
 | `build_from_exports.py` | Fallback when Power BI isn't reachable: `python3 build_from_exports.py <ResultsByForm.xlsx> <BuyerCommitments.xlsx> --out dist` renders the same page from KARMA grid exports |
 | `empmap.json` | Employee → `[title, manager]`. **Edit this when reps join or move.** Manager drives the Manager filter |
 | `dist_codes.json` | Distributor code → name fallback for codes not in the Depletions Bottler table |
@@ -62,18 +62,24 @@ IT gives you: Tenant ID, Application (client) ID, client secret value, and (opti
 | `ENTRA_CLIENT_ID` | from IT |
 | `ENTRA_CLIENT_SECRET` | from IT (the secret *value*) |
 | `SESSION_SECRET` | any random string of 32+ characters, e.g. the output of `openssl rand -base64 48` |
-| `ENTRA_GROUP_ID` | optional: Object ID of the access group |
+| `SITE_URL` | `https://mbrewfielddashboard.netlify.app` (the one address the site answers on; all sign-in redirects are built from it) |
+| `ENTRA_GROUP_ID` | optional but recommended: Object ID of the access group; needs the *groups claim* from step 2 |
 | `ALLOWED_DOMAIN` | optional: defaults to `monsterbrewing.com` |
-| `SESSION_HOURS` | optional: absolute lifetime of a sign-in, default 8 |
-| `IDLE_MINUTES` | optional: sign in again after this long with no activity, default 60 |
+| `SESSION_HOURS` | optional: hard lifetime of a sign-in, 1–12, default 8 |
+| `IDLE_MINUTES` | optional: sign in again after this long with no activity, 5–120, default 60 |
 
-Sessions are a signed, HttpOnly cookie that renews while the user is active and expires after `IDLE_MINUTES` of
-inactivity or `SESSION_HOURS` after login, whichever is first; nobody's password is ever stored or seen by the site.
-The **Sign out** link in the toolbar opens `/.auth/logout`, which asks for confirmation; the sign-out itself is a
-same-site POST that revokes the session server-side (its id is written to a Netlify Blobs store named
-`revoked-sessions`, checked on every request) and then ends the Microsoft session, so a copied cookie stops working
-at logout. Netlify Blobs is on by default. If that store cannot be reached the site returns a 503 "temporarily
-unavailable" page instead of serving the dashboard (fails closed).
+How access is decided: the ID token from Microsoft is verified (signature, issuer, audience, nonce), then the user
+is authorized by **tenant ID + object ID** from that token; the sign-in name must also be on `ALLOWED_DOMAIN`, and
+if `ENTRA_GROUP_ID` is set the token must list that group (a missing groups claim is a refusal, not a pass).
+
+Sessions are a signed, HttpOnly `__Host-` cookie that renews while the user is active and expires after
+`IDLE_MINUTES` of inactivity or `SESSION_HOURS` after login, whichever is first; nobody's password is ever stored or
+seen by the site. The **Sign out** link in the toolbar opens `/.auth/logout`, which asks for confirmation; the
+sign-out itself is a same-site POST with a CSRF token that revokes the session server-side (its id is written to a
+Netlify Blobs store named `revoked-sessions`, checked on every request) and then ends the Microsoft session, so a
+copied cookie stops working at logout. Netlify Blobs is on by default. If that store cannot be reached, or the
+function hits any other error, the site returns a 503 page instead of serving the dashboard (fails closed).
+Requests on any address other than `SITE_URL` (deploy previews included) are redirected to it.
 
 ### 4. GitHub
 Create a private repo, push these files, then **Settings → Secrets and variables → Actions → New repository secret** for each:
@@ -115,7 +121,8 @@ Run the fixture build locally to check it still renders, then commit.
   URLs are only used if they are `https://` on the KARMA/VIP media hosts (`karma.vtinfo.com`, `api.vtinfo.com`), and thumbnails use data attributes + delegated handlers (no inline
   `onclick`/`onerror` built from data). The build escapes `</` inside the embedded JSON so a note can never close the
   `<script>` block.
-- After sign-in the user always lands on `/`; no part of the request chooses the redirect target.
+- After sign-in the user always lands on `SITE_URL/`; redirect targets come from configuration, never from the request.
+- No page content is built by inserting data into HTML strings unescaped; the header subtitle and map tooltips use text nodes.
 - Requests other than GET (the feedback form, sign-out) must carry a same-site `Origin`/`Referer` header in addition to the
   `SameSite=Lax` session cookie, which blocks cross-site request forgery.
 - The Excel export library is loaded from cdnjs with a Subresource Integrity hash pinned to SheetJS 0.18.5, so a
