@@ -13,10 +13,16 @@
 //   SESSION_SECRET       random string, 32+ chars, used to sign the session cookie
 //   ENTRA_GROUP_ID       optional: object ID of an Entra group; only members get in
 //   ALLOWED_DOMAIN       optional: email domain to allow (default monsterbrewing.com)
-//   SESSION_HOURS        optional: session length in hours (default 8)
+//   SESSION_HOURS        optional: absolute session lifetime in hours (default 8)
+//   IDLE_MINUTES         optional: sign in again after this long without activity (default 60)
+//
+// Sessions are revocable: /.auth/logout records the session id in a Netlify Blobs store
+// ("revoked-sessions") and every request checks it, so a signed-out cookie is dead immediately
+// even though it has not reached its expiry time.
 
 import type { Config, Context } from "https://edge.netlify.com/v1/index.ts";
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "npm:jose@5.9.6";
+import { getStore } from "npm:@netlify/blobs@11.1.7";
 
 const env = (k: string, d = "") => Netlify.env.get(k) ?? d;
 const TENANT = env("ENTRA_TENANT_ID");
@@ -26,6 +32,7 @@ const SESSION_SECRET = env("SESSION_SECRET");
 const GROUP_ID = env("ENTRA_GROUP_ID");
 const DOMAIN = env("ALLOWED_DOMAIN", "monsterbrewing.com").toLowerCase();
 const SESSION_HOURS = Number(env("SESSION_HOURS", "8")) || 8;
+const IDLE_MINUTES = Number(env("IDLE_MINUTES", "60")) || 60;
 
 const ISSUER = `https://login.microsoftonline.com/${TENANT}/v2.0`;
 const AUTHZ = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`;
@@ -35,6 +42,7 @@ const JWKS = createRemoteJWKSet(new URL(`https://login.microsoftonline.com/${TEN
 
 const SESSION_COOKIE = "fsd_session";
 const SESSION_AUD = "field-survey-dashboard";
+const REVOKED = () => getStore({ name: "revoked-sessions", consistency: "strong" });
 const FLOW_COOKIE = "fsd_flow";
 const CALLBACK_PATH = "/.auth/callback";
 const LOGOUT_PATH = "/.auth/logout";
@@ -139,25 +147,68 @@ async function finishLogin(req: Request, url: URL) {
     if (!groups.includes(GROUP_ID)) return deny("Your account is not in the dashboard access group. Ask IT to add you.");
   }
 
-  const session = await new SignJWT({ email, name: claims.name || "" })
-    .setProtectedHeader({ alg: "HS256" }).setIssuer(url.origin).setAudience(SESSION_AUD)
-    .setIssuedAt().setExpirationTime(`${SESSION_HOURS}h`).sign(secretKey());
+  const now = Math.floor(Date.now() / 1000);
+  const session = await mintSession({ email, name: String(claims.name || ""), jti: randomString(16), login: now }, url.origin);
   const target = safeReturnPath(flow.returnTo, url.origin);
-  return redirect(target, [cookie(SESSION_COOKIE, session, SESSION_HOURS * 3600), cookie(FLOW_COOKIE, "", 0)]);
+  return redirect(target, [cookie(SESSION_COOKIE, session, IDLE_MINUTES * 60), cookie(FLOW_COOKIE, "", 0)]);
+}
+
+type Session = { email: string; name: string; jti: string; login: number };
+
+/** Expiry = idle timeout from now, capped at the absolute lifetime measured from the original login. */
+async function mintSession(sess: Session, origin: string): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = Math.min(now + IDLE_MINUTES * 60, sess.login + SESSION_HOURS * 3600);
+  return await new SignJWT({ email: sess.email, name: sess.name, login: sess.login })
+    .setProtectedHeader({ alg: "HS256" }).setJti(sess.jti).setIssuer(origin).setAudience(SESSION_AUD)
+    .setIssuedAt(now).setExpirationTime(exp).sign(secretKey());
+}
+
+async function isRevoked(jti: string): Promise<boolean> {
+  try {
+    return (await REVOKED().get(jti)) !== null;
+  } catch (e) {
+    console.error("revocation store unavailable:", e);
+    return false;
+  }
+}
+
+async function revoke(jti: string, login: number) {
+  try {
+    // keep the marker until the session could no longer be valid anyway
+    await REVOKED().setJSON(jti, { revokedAt: Date.now(), expires: (login + SESSION_HOURS * 3600) * 1000 });
+  } catch (e) {
+    console.error("could not record logout:", e);
+  }
 }
 
 /** A session is valid only if it was signed with our secret using HS256, is unexpired, was issued
- *  for this site, and still names an allowed account. Anything else is treated as signed-out. */
-async function validSession(token: string, origin: string): Promise<boolean> {
+ *  for this site, names an allowed account, is within the absolute lifetime, and has not been
+ *  revoked by a logout. Anything else is treated as signed-out. */
+async function validSession(token: string, origin: string): Promise<Session | null> {
   try {
     const { payload } = await jwtVerify(token, secretKey(), {
-      algorithms: ["HS256"], issuer: origin, audience: SESSION_AUD, maxTokenAge: `${SESSION_HOURS}h`,
+      algorithms: ["HS256"], issuer: origin, audience: SESSION_AUD, maxTokenAge: `${IDLE_MINUTES}m`,
     });
     const email = typeof payload.email === "string" ? payload.email.toLowerCase() : "";
-    return email.endsWith("@" + DOMAIN);
+    const login = typeof payload.login === "number" ? payload.login : 0;
+    const now = Math.floor(Date.now() / 1000);
+    if (!email.endsWith("@" + DOMAIN) || !payload.jti || !login || now > login + SESSION_HOURS * 3600) return null;
+    if (await isRevoked(payload.jti)) return null;
+    return { email, name: String(payload.name || ""), jti: payload.jti, login };
   } catch {
-    return false; // expired, tampered, wrong algorithm, or foreign token
+    return null; // expired, tampered, wrong algorithm, or foreign token
   }
+}
+
+/** Cross-site request forgery guard for anything that is not a plain GET: the browser-supplied
+ *  Origin (or Referer) must be this site. Combined with the SameSite=Lax session cookie. */
+function sameOrigin(req: Request, origin: string): boolean {
+  const o = req.headers.get("origin");
+  if (o) return o === origin;
+  const r = req.headers.get("referer");
+  if (r) { try { return new URL(r).origin === origin; } catch { return false; } }
+  return false;
 }
 
 export default async (req: Request, context: Context) => {
@@ -166,21 +217,34 @@ export default async (req: Request, context: Context) => {
     return deny("Sign-in is not configured yet (missing ENTRA_* or SESSION_SECRET settings).", 503);
   }
   if (url.pathname === CALLBACK_PATH) return finishLogin(req, url);
+  const cookieVal = readCookie(req, SESSION_COOKIE);
+  const sess = cookieVal ? await validSession(cookieVal, url.origin) : null;
+
   if (url.pathname === LOGOUT_PATH) {
+    if (sess) await revoke(sess.jti, sess.login);
     const back = encodeURIComponent(url.origin + "/");
     return redirect(`${LOGOUT}?post_logout_redirect_uri=${back}`, [cookie(SESSION_COOKIE, "", 0)]);
   }
 
-  const session = readCookie(req, SESSION_COOKIE);
-  if (session && (await validSession(session, url.origin))) {
-    {
-      const res = await context.next();
-      const out = new Response(res.body, res);
-      out.headers.set("Cache-Control", "private, no-store");
-      return out;
+  if (sess) {
+    if (req.method !== "GET" && req.method !== "HEAD" && !sameOrigin(req, url.origin)) {
+      return new Response("Cross-site request blocked", { status: 403 });
     }
+    const res = await context.next();
+    const out = new Response(res.body, res);
+    out.headers.set("Cache-Control", "private, no-store");
+    // sliding renewal: refresh the cookie once half the idle window has passed
+    const now = Math.floor(Date.now() / 1000);
+    const remaining = sess.login + SESSION_HOURS * 3600 - now;
+    if (remaining > 0) {
+      const iat = Number((await jwtVerify(cookieVal!, secretKey(), { algorithms: ["HS256"] })).payload.iat || now);
+      if (now - iat > (IDLE_MINUTES * 60) / 2) {
+        out.headers.append("Set-Cookie", cookie(SESSION_COOKIE, await mintSession(sess, url.origin), Math.min(IDLE_MINUTES * 60, remaining)));
+      }
+    }
+    return out;
   }
-  if (req.method !== "GET") return new Response("Sign in required", { status: 401 });
+  if (req.method !== "GET" && req.method !== "HEAD") return new Response("Sign in required", { status: 401 });
   return startLogin(url);
 };
 

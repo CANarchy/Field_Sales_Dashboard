@@ -65,10 +65,15 @@ IT gives you: Tenant ID, Application (client) ID, client secret value, and (opti
 | `SESSION_SECRET` | any random string of 32+ characters, e.g. the output of `openssl rand -base64 48` |
 | `ENTRA_GROUP_ID` | optional: Object ID of the access group |
 | `ALLOWED_DOMAIN` | optional: defaults to `monsterbrewing.com` |
-| `SESSION_HOURS` | optional: how long a sign-in lasts, default 8 |
+| `SESSION_HOURS` | optional: absolute lifetime of a sign-in, default 8 |
+| `IDLE_MINUTES` | optional: sign in again after this long with no activity, default 60 |
 
-Sessions are a signed, HttpOnly cookie; nobody's password is ever stored or seen by the site.
-Visiting `/.auth/logout` signs out.
+Sessions are a signed, HttpOnly cookie that renews while the user is active and expires after `IDLE_MINUTES` of
+inactivity or `SESSION_HOURS` after login, whichever is first; nobody's password is ever stored or seen by the site.
+Visiting `/.auth/logout` signs out *and* revokes that session server-side (the session id is written to a Netlify Blobs
+store named `revoked-sessions`, which every request checks), so a copied cookie stops working at logout. Netlify Blobs
+is on by default; if the store is ever unreachable the function logs the error and falls back to expiry-only sessions
+rather than locking everyone out.
 
 ### 4. GitHub
 Create a private repo, push these files, then **Settings → Secrets and variables → Actions → New repository secret** for each:
@@ -110,6 +115,10 @@ Run the fixture build locally to check it still renders, then commit.
   URLs are only used if they are `https://`, and thumbnails use data attributes + delegated handlers (no inline
   `onclick`/`onerror` built from data). The build escapes `</` inside the embedded JSON so a note can never close the
   `<script>` block.
+- Requests other than GET (the feedback form) must carry a same-site `Origin`/`Referer` header in addition to the
+  `SameSite=Lax` session cookie, which blocks cross-site request forgery.
+- The Excel export library is loaded from cdnjs with a Subresource Integrity hash pinned to SheetJS 0.18.5, so a
+  tampered copy will not run (the export then falls back to CSV).
 - CSV exports prefix any cell starting with `=`, `+`, `-`, `@`, tab or CR so spreadsheets don't execute it as a formula.
 - The former client-side login (`wrapper.html`, embedded decryption key, "remember me" password storage) is gone;
   access control is the Entra ID edge function above.

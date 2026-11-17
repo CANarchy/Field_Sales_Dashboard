@@ -691,7 +691,7 @@ async function doExport(btn, rows, cols, base){cols=cols||XCOLS;base=base||'Fiel
   btn.disabled=true;const t0=btn.textContent;btn.textContent='Exporting…';
   try{
     if(!window.XLSX)await new Promise((res,rej)=>{const sc=document.createElement('script');
-      sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';sc.onload=res;sc.onerror=rej;document.head.appendChild(sc);});
+      sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';sc.integrity='sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw';sc.crossOrigin='anonymous';sc.referrerPolicy='no-referrer';sc.onload=res;sc.onerror=rej;document.head.appendChild(sc);});
     const ws=XLSX.utils.aoa_to_sheet([cols,...rows]);
     ws['!cols']=cols.map((c,i)=>({wch:(base==='Field_Surveys'?[16,18,16,28,9,24,14,4,6,8,16,18,34,18,9,10,9,9,50,40][i]:16)||12}));
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Surveys');
@@ -765,7 +765,7 @@ async function exportCommitments(){
   }));
   try{
     if(!window.XLSX)await new Promise((res,rej)=>{const sc=document.createElement('script');
-      sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';sc.onload=res;sc.onerror=rej;document.head.appendChild(sc);});
+      sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';sc.integrity='sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw';sc.crossOrigin='anonymous';sc.referrerPolicy='no-referrer';sc.onload=res;sc.onerror=rej;document.head.appendChild(sc);});
     const wb=XLSX.utils.book_new();
     const mk=rows=>{const ws=XLSX.utils.aoa_to_sheet([cols,...rows]);ws['!cols']=cols.map((c,i)=>({wch:[26,9,24,14,4,6,26,26,16,16,14,30,5,14,36,10,12,11][i]||14}));return ws;};
     XLSX.utils.book_append_sheet(wb,mk(open),'Not Delivered (OPEN)');
@@ -942,7 +942,7 @@ render();
       submitted_at:new Date().toISOString()});
     st.style.color='var(--mut)';st.textContent='Sending…';
     try{
-      const r=await fetch('/',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:payload.toString()});
+      const r=await fetch('/',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Requested-With':'fetch'},body:payload.toString()});
       if(!r.ok)throw new Error('http '+r.status);
       st.style.color='#4C7A00';st.textContent='Sent — thanks. The admin will review and approve fixes.';
       document.getElementById('fbMsg').value='';document.getElementById('fbFallback').style.display='none';
