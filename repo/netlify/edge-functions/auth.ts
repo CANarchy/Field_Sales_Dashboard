@@ -279,8 +279,12 @@ async function finishLogin(req: Request, url: URL, origin: string) {
   const silent = flow.silent === true;
   // When a silent re-authorization fails for any reason the old session must not survive it.
   const endSession = [...clearFlow, cookie(SESSION_COOKIE, "", 0)];
-  const refuse = async (message: string, status: number) => {
+  /** Server-side revocation of the session a silent re-check was started for (no-op for a fresh sign-in). */
+  const endRecheckedSession = async () => {
     if (silent && typeof flow.jti === "string" && typeof flow.login === "number") await revoke(flow.jti, flow.login);
+  };
+  const refuse = async (message: string, status: number) => {
+    await endRecheckedSession();
     return deny(message, status, silent ? endSession : clearFlow);
   };
 
@@ -293,8 +297,12 @@ async function finishLogin(req: Request, url: URL, origin: string) {
   }
   if (!code) {
     // Microsoft declined (for a silent attempt: signed out there, account disabled, or no longer assigned).
-    // Fall back to a normal interactive sign-in, which starts a brand-new session if it succeeds.
-    if (silent) return await startLogin(origin);
+    // The session that asked for the re-check is over: revoke it server-side first, then offer a normal
+    // interactive sign-in, which starts a brand-new session only if Microsoft approves it.
+    if (silent) {
+      await endRecheckedSession();
+      return await startLogin(origin);
+    }
     return await refuse("Sign-in did not complete. Please try again.", 400);
   }
 
@@ -344,6 +352,8 @@ async function finishLogin(req: Request, url: URL, origin: string) {
     // A re-check continues the same session: same user, same session id, same hard-lifetime clock.
     if (flow.oid !== oid) return await refuse("A different account is signed in. Please sign in again.", 403);
     if (typeof flow.login !== "number" || typeof flow.jti !== "string" || now >= flow.login + SESSION_HOURS * 3600) {
+      // Past the hard lifetime: the old session ends here (revoked), and a full sign-in is required.
+      await endRecheckedSession();
       return await startLogin(origin);
     }
     login = flow.login;
