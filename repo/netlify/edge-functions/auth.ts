@@ -232,6 +232,25 @@ async function csrfValid(token: string, sess: Session, origin: string): Promise<
 }
 
 // ------------------------------------------------------------------ sign-in
+/** What a Microsoft ID token must satisfy before any of its claims are trusted. */
+const ID_TOKEN_RULES = {
+  issuer: ISSUER,          // issued by our tenant
+  audience: CLIENT_ID,     // issued for this application
+  algorithms: ["RS256"],   // signed with Microsoft's published keys, no other algorithm accepted
+  maxTokenAge: "10m",      // freshly issued
+  clockTolerance: 60,
+};
+/** Returns the verified claims, or null if the token is missing, forged, expired or meant for someone else. */
+async function verifyMicrosoftIdToken(idToken: unknown): Promise<Record<string, unknown> | null> {
+  if (typeof idToken !== "string" || !idToken) return null;
+  try {
+    const verified = await jwtVerify(idToken, JWKS, ID_TOKEN_RULES);
+    return verified.payload;
+  } catch {
+    return null;
+  }
+}
+
 /** Starts a Microsoft sign-in. With `recheck` (an existing session) the request is silent (prompt=none):
  *  Microsoft re-issues a token only if the account is still enabled and still allowed to use this app,
  *  and the callback re-applies every authorization rule, including group membership. */
@@ -321,14 +340,8 @@ async function finishLogin(req: Request, url: URL, origin: string) {
   if (!tr.ok) return await refuse("Microsoft rejected the sign-in. Please try again.", 401);
   const tokens = await tr.json();
 
-  let claims: Record<string, unknown>;
-  try {
-    claims = (await jwtVerify(String(tokens.id_token || ""), JWKS, {
-      issuer: ISSUER, audience: CLIENT_ID, algorithms: ["RS256"], maxTokenAge: "10m", clockTolerance: 60,
-    })).payload;
-  } catch {
-    return await refuse("The sign-in token could not be verified.", 401);
-  }
+  const claims = await verifyMicrosoftIdToken(tokens.id_token);
+  if (!claims) return await refuse("The sign-in token could not be verified.", 401);
 
   // ---- authorization: who is allowed in (applied on every sign-in AND every silent re-check) ----
   // Identity is the immutable tenant id + object id from the verified token (not the email address).
@@ -407,6 +420,10 @@ export default async (req: Request, context: Context) => {
   // Only the canonical address is served (also blocks Host-header tricks and preview URLs).
   if (url.origin !== origin) return safeRedirect(homeUrl(origin), origin);
 
+  // The three things this function can be asked for.
+  const route: "callback" | "sign-out" | "dashboard" =
+    url.pathname === CALLBACK_PATH ? "callback" : url.pathname === LOGOUT_PATH ? "sign-out" : "dashboard";
+
   // ---- CSRF protection for every state-changing request ----
   // GET/HEAD never change state here. POST is the only other method accepted, and it must (a) come from
   // this site per the browser's Origin/Referer and (b) be either the sign-out form, which is checked
@@ -416,14 +433,13 @@ export default async (req: Request, context: Context) => {
   if (!isRead) {
     if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: SECURITY_HEADERS });
     if (!sameOrigin(req, origin)) return new Response("Cross-site request blocked", { status: 403, headers: SECURITY_HEADERS });
-    const isLogoutForm = url.pathname === LOGOUT_PATH;
-    if (!isLogoutForm && req.headers.get("x-requested-with") !== "fetch") {
+    if (route !== "sign-out" && req.headers.get("x-requested-with") !== "fetch") {
       return new Response("Cross-site request blocked", { status: 403, headers: SECURITY_HEADERS });
     }
   }
 
   try {
-    if (url.pathname === CALLBACK_PATH) {
+    if (route === "callback") {
       // Sign-in callback: protected against login CSRF by the `state` value bound to the signed flow cookie.
       return isRead ? await finishLogin(req, url, origin) : new Response("Method not allowed", { status: 405, headers: SECURITY_HEADERS });
     }
@@ -432,9 +448,12 @@ export default async (req: Request, context: Context) => {
     const candidate = await readSession(readCookie(req, SESSION_COOKIE), origin);
     const sess = candidate && !(await isRevoked(candidate.jti)) ? candidate : null;
 
-    if (url.pathname === LOGOUT_PATH) {
-      // GET only renders the confirmation form (no state change); the POST is CSRF-checked in doLogout().
-      return req.method === "POST" ? await doLogout(req, sess, origin) : await logoutPage(sess, origin);
+    if (route === "sign-out") {
+      // A GET never signs anyone out: it only renders the confirmation form, which embeds a CSRF token.
+      if (isRead) return await logoutPage(sess, origin);
+      // The POST has already passed the same-origin check above; doLogout() also requires the CSRF token
+      // before the session is revoked.
+      return await doLogout(req, sess, origin);
     }
 
     if (!sess) {
